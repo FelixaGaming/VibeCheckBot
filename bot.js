@@ -426,7 +426,16 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
     (usage.completion_tokens / 1000000) * CONFIG.COST_PER_1M_OUTPUT_TOKENS
   );
 
-  let result = JSON.parse(response.choices[0].message.content.trim());
+  let rawContent = response.choices[0].message.content.trim();
+  // Strip markdown code fences GPT sometimes wraps around JSON
+  rawContent = rawContent.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+  let result;
+  try {
+    result = JSON.parse(rawContent);
+  } catch (parseErr) {
+    console.error('⚠️ GPT returned invalid JSON:', rawContent.substring(0, 200));
+    throw new Error('GPT returned malformed JSON. Please try again.');
+  }
   result.friendlinessScore = clamp(result.friendlinessScore, 0, 10);
 
   const sentimentTotal = result.sentiment.friendly + result.sentiment.neutral + result.sentiment.unfriendly;
@@ -820,13 +829,17 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
       const topFlagged = [...(result.flaggedMessages || [])]
         .sort((a, b) => b.severity - a.severity)
         .slice(0, isMulti ? 5 : 10)
-        .map(f => `• [\`${f.type}\` **${f.severity}/10**] ${f.message.substring(0, 75)}${f.message.length > 75 ? '…' : ''}`)
+        .map(f => `• [\`${f.type}\` **${f.severity}/10**] ${(f.message || '').substring(0, 75)}${(f.message || '').length > 75 ? '…' : ''}`)
+        .filter(line => line.trim().length > 0)
         .join('\n');
-      embed.addFields({
-        name: `🚨 Most Severe Flagged Messages`,
-        value: topFlagged.substring(0, 1024) + (totalFlagged > (isMulti ? 5 : 10) ? `\n_…and ${totalFlagged - (isMulti ? 5 : 10)} more in the email report_` : ''),
-        inline: false
-      });
+      const flaggedValue = (topFlagged + (totalFlagged > (isMulti ? 5 : 10) ? `\n_…and ${totalFlagged - (isMulti ? 5 : 10)} more in the email report_` : '')).substring(0, 1024);
+      if (flaggedValue.trim().length > 0) {
+        embed.addFields({
+          name: `🚨 Most Severe Flagged Messages`,
+          value: flaggedValue,
+          inline: false
+        });
+      }
     }
   }
 
@@ -869,7 +882,7 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
         const top2 = [...chFlagged].sort((a, b) => b.severity - a.severity).slice(0, 2);
         chValue += `\n🚨 **Worst flagged:**\n`;
         top2.forEach(f => {
-          chValue += `• [\`${f.type}\` ${f.severity}/10] ${f.message.substring(0, 65)}${f.message.length > 65 ? '…' : ''}\n`;
+          chValue += `• [\`${f.type}\` ${f.severity}/10] ${(f.message || '').substring(0, 65)}${(f.message || '').length > 65 ? '…' : ''}\n`;
         });
       }
 
@@ -906,10 +919,10 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
 
   // ── SUMMARY + RECOMMENDATION ──────────────────────────────────
   if (result.summary) {
-    embed.addFields({ name: '🗒️ Vibe Insights', value: result.summary, inline: false });
+    embed.addFields({ name: '🗒️ Vibe Insights', value: result.summary.substring(0, 1024), inline: false });
   }
   if (result.recommendation) {
-    embed.addFields({ name: '💡 AI Recommendations', value: result.recommendation, inline: false });
+    embed.addFields({ name: '💡 AI Recommendations', value: result.recommendation.substring(0, 1024), inline: false });
   }
 
   embed.addFields({
@@ -1295,8 +1308,8 @@ async function handleVibeCommand(interaction) {
     }
   }
 
-  // FIX #2: Always defer ephemerally — the real report goes to DM (private) or channel (public)
-  await interaction.deferReply({ ephemeral: true });
+  // Private: defer ephemerally (DM delivery). Public: defer non-ephemerally so editReply is visible to all.
+  await interaction.deferReply({ ephemeral: isPrivate });
   setCooldown(interaction.user.id);
 
   try {
@@ -1535,11 +1548,11 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     });
     const toxEntries = Object.entries(toxMap).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);
 
-    // Channel stats map for ranking chart
-    const allChannels = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
+    // Channel stats map for ranking chart — uses filteredReports to respect any channel filter
+    const allChannels = [...new Set(filteredReports.map(r => r.channel_name).filter(Boolean))];
     const channelStats = {};
     allChannels.forEach(ch => {
-      const chReps = sorted.filter(r => r.channel_name === ch);
+      const chReps = filteredReports.filter(r => r.channel_name === ch);
       if (chReps.length > 0) {
         channelStats[ch] = { latestScore: chReps[chReps.length-1].score, reportCount: chReps.length };
       }
