@@ -1289,7 +1289,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     const diff = parseFloat(scoreDiff);
     if (diff < -0.5) recommendations.push(`📉 Score dropped ${Math.abs(diff)} points — post a community guidelines reminder and review recent flagged messages.`);
     else if (diff > 0.5) recommendations.push(`📈 Great progress (+${diff} pts) — keep current moderation. Consider highlighting positive contributors.`);
-    else recommendations.push(`➡️ Score is stable — run a targeted `/vibe` on your lowest-performing channel to find improvement areas.`);
+    else recommendations.push(`➡️ Score is stable — run a targeted /vibe on your lowest-performing channel to find improvement areas.`);
     if (lastFlagged > firstFlagged) recommendations.push(`⚠️ Flagged messages increased (${firstFlagged} → ${lastFlagged}) — consider stricter auto-mod rules or a warning post.`);
     if (lastUnfriendlyPct > firstUnfriendlyPct) recommendations.push(`🔴 Unfriendly messages rose ${firstUnfriendlyPct}% → ${lastUnfriendlyPct}% — a pinned reminder of community rules may help.`);
 
