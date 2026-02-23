@@ -873,9 +873,26 @@ async function handleVibeCommand(interaction) {
       const n = `#${ch.name}`; cached[n] = msgs; chMsgCounts[n] = msgs.length; channelNames.push(n);
     }
 
-    if (Object.values(cached).reduce((s,m) => s+m.length, 0) < 5) {
-      return interaction.editReply('Not enough messages. Need at least 5 in the selected timeframe. Try a longer timeframe.');
+   let totalCached = Object.values(cached).reduce((s,m) => s+m.length, 0);
+let usedFallback = false;
+
+if (totalCached < 5) {
+  // Fallback: fetch most recent messages ignoring timeframe
+  for (const ch of channels) {
+    const n = `#${ch.name}`;
+    const fallbackMsgs = await fetchChannelMessages(ch, mpc, 365 * 24 * 60 * 60 * 1000);
+    if (fallbackMsgs.length > cached[n].length) {
+      cached[n] = fallbackMsgs;
+      chMsgCounts[n] = fallbackMsgs.length;
     }
+  }
+  totalCached = Object.values(cached).reduce((s,m) => s+m.length, 0);
+  usedFallback = true;
+}
+
+if (totalCached < 5) {
+  return interaction.editReply('Not enough messages found. Please send some messages in the channel first, then try again.');
+}
 
     const channelResults = {};
     let totTime=0, totCost=0, totIn=0, totOut=0, totAnalyzed=0;
@@ -927,7 +944,8 @@ async function handleVibeCommand(interaction) {
     await incrementUsage(serverId);
     const remaining = await getReportsRemaining(serverId);
 
-    const embeds  = buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
+    const displayTimeLabel = usedFallback ? 'all available messages' : timeLabel;
+const embeds = buildVibeEmbeds(result, totAnalyzed, channelNames, displayTimeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
       new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
