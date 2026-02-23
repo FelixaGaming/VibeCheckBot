@@ -1545,7 +1545,10 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     if (range === '30d') {
       query = query.gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
     } else {
-      query = query.limit(parseInt(range) || 10);
+      // Fetch extra headroom when a channel filter is active — the limit is applied AFTER filtering
+      const baseLimit = parseInt(range) || 10;
+      const fetchLimit = (filterChannels && filterChannels.length > 0) ? Math.max(baseLimit * 5, 50) : baseLimit;
+      query = query.limit(fetchLimit);
     }
 
     const { data: reports, error } = await query;
@@ -1569,6 +1572,11 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       if (filteredReports.length === 0) {
         const chList = chNames.join(', ');
         return interaction.editReply(`❌ No reports found for ${chList}. Run \`/vibe\` in that channel first.`);
+      }
+      // Trim to the originally requested range (we over-fetched to account for filtering)
+      if (range !== '30d') {
+        const baseLimit = parseInt(range) || 10;
+        filteredReports = filteredReports.slice(-baseLimit); // keep the most recent N
       }
     }
 
@@ -1604,13 +1612,19 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     });
     const toxEntries = Object.entries(toxMap).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);
 
-    // Channel stats map for ranking chart — uses filteredReports to respect any channel filter
-    const allChannels = [...new Set(filteredReports.map(r => r.channel_name).filter(Boolean))];
+    // Channel stats map for ranking chart — split CSV channel_name so multi-channel runs
+    // contribute to individual channel stats rather than appearing as their own entry
+    const indivChannelSet = new Set();
+    filteredReports.forEach(r => {
+      if (r.channel_name) r.channel_name.split(',').map(s => s.trim()).filter(Boolean).forEach(ch => indivChannelSet.add(ch));
+    });
     const channelStats = {};
-    allChannels.forEach(ch => {
-      const chReps = filteredReports.filter(r => r.channel_name === ch);
+    [...indivChannelSet].forEach(ch => {
+      const chReps = filteredReports.filter(r =>
+        r.channel_name && r.channel_name.split(',').map(s => s.trim()).includes(ch)
+      );
       if (chReps.length > 0) {
-        channelStats[ch] = { latestScore: parseFloat(chReps[chReps.length-1].score) || 0, reportCount: chReps.length };
+        channelStats[ch] = { latestScore: parseFloat(chReps[chReps.length - 1].score) || 0, reportCount: chReps.length };
       }
     });
     const isMulti = Object.keys(channelStats).length > 1;
