@@ -153,21 +153,73 @@ const client = new Client({
 const serverUsage = new Map();
 const cooldowns = new Map();
 const serverThrottle = new Map();
+const trialEndedNotified = new Set(); // prevents spamming trial-ended email on every retry
 
-async function getUsageFromDB(serverId) {
+// ── SINGLE STATUS RESOLVER ────────────────────────────────────────────────────
+// Fetches everything in 3 parallel queries instead of 16 sequential ones.
+// Also handles Pro monthly reset: if month_start > 30 days ago, resets reports_used.
+async function getServerStatus(serverId) {
   try {
-    const { data } = await supabase.from('usage').select('*').eq('server_id', serverId).single();
-    return data;
-  } catch { return null; }
+    const [testerRes, paidRes, usageRes] = await Promise.all([
+      supabase.from('testers').select('expires_at').eq('server_id', serverId).single(),
+      supabase.from('paid_servers').select('expires_at').eq('server_id', serverId).single(),
+      supabase.from('usage').select('*').eq('server_id', serverId).single()
+    ]);
+
+    const now = new Date();
+
+    // Tester check
+    const testerData = testerRes.data;
+    const isTester = !!(testerData && new Date(testerData.expires_at) > now);
+
+    // Paid check
+    const paidData = paidRes.data;
+    const isPaid = !!(paidData && (!paidData.expires_at || new Date(paidData.expires_at) > now));
+
+    // Subscription days left
+    let subDaysLeft = 0;
+    if (paidData?.expires_at) {
+      subDaysLeft = Math.max(0, Math.ceil((new Date(paidData.expires_at).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+    }
+
+    // Usage + monthly reset for Pro
+    let usageData = usageRes.data;
+    let reportsUsed = usageData?.reports_used || 0;
+    const freeBonus = usageData?.free_bonus || 0;
+    const monthStart = usageData?.month_start ? new Date(usageData.month_start) : null;
+
+    if (isPaid && monthStart) {
+      const daysSinceReset = (now.getTime() - monthStart.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSinceReset >= 30) {
+        // Reset monthly counter
+        reportsUsed = 0;
+        await supabase.from('usage').update({ reports_used: 0, month_start: now.toISOString() }).eq('server_id', serverId);
+        console.log(`🔄 Monthly reset for server ${serverId}`);
+      }
+    }
+
+    // Compute remaining + canUse
+    let remaining, canUse;
+    if (isTester) {
+      remaining = 999;
+      canUse = true;
+    } else if (isPaid) {
+      remaining = CONFIG.PRO_REPORTS_PER_MONTH - reportsUsed;
+      canUse = reportsUsed < CONFIG.PRO_REPORTS_PER_MONTH;
+    } else {
+      remaining = (CONFIG.FREE_REPORTS + freeBonus) - reportsUsed;
+      canUse = reportsUsed < (CONFIG.FREE_REPORTS + freeBonus);
+    }
+
+    return { isTester, isPaid, reportsUsed, freeBonus, remaining, canUse, subDaysLeft, usageExists: !!usageData, monthStart: monthStart?.getTime() || Date.now() };
+  } catch (err) {
+    console.error('getServerStatus error:', err.message);
+    // Safe fallback
+    return { isTester: false, isPaid: false, reportsUsed: 0, freeBonus: 0, remaining: CONFIG.FREE_REPORTS, canUse: true, subDaysLeft: 0, usageExists: false, monthStart: Date.now() };
+  }
 }
 
-async function getReportsUsed(serverId) {
-  const dbUsage = await getUsageFromDB(serverId);
-  if (dbUsage) return dbUsage.reports_used || 0;
-  if (!serverUsage.has(serverId)) serverUsage.set(serverId, { reportsUsed: 0 });
-  return serverUsage.get(serverId).reportsUsed;
-}
-
+// Kept for admin command compatibility
 async function isPaid(serverId) {
   try {
     const { data } = await supabase.from('paid_servers').select('server_id, expires_at').eq('server_id', serverId).single();
@@ -185,47 +237,11 @@ async function isTester(serverId) {
   } catch { return false; }
 }
 
-async function getFreeBonus(serverId) {
+async function incrementUsage(serverId, status) {
+  if (status.isTester) return;
   try {
-    const { data } = await supabase.from('usage').select('free_bonus').eq('server_id', serverId).single();
-    return data?.free_bonus || 0;
-  } catch { return 0; }
-}
-
-async function getSubscriptionStatus(serverId) {
-  try {
-    const { data } = await supabase.from('paid_servers').select('expires_at').eq('server_id', serverId).single();
-    if (!data || !data.expires_at) return { isActive: false, daysLeft: 0 };
-    const msLeft = new Date(data.expires_at).getTime() - Date.now();
-    const daysLeft = Math.ceil(msLeft / (1000 * 60 * 60 * 24));
-    return { isActive: daysLeft > 0, daysLeft: Math.max(0, daysLeft) };
-  } catch { return { isActive: false, daysLeft: 0 }; }
-}
-
-async function canUseBot(serverId) {
-  if (await isTester(serverId)) return true;
-  const paid = await isPaid(serverId);
-  const used = await getReportsUsed(serverId);
-  if (paid) return used < CONFIG.PRO_REPORTS_PER_MONTH;
-  const bonus = await getFreeBonus(serverId);
-  return used < (CONFIG.FREE_REPORTS + bonus);
-}
-
-async function getReportsRemaining(serverId) {
-  if (await isTester(serverId)) return 999;
-  const paid = await isPaid(serverId);
-  const used = await getReportsUsed(serverId);
-  if (paid) return CONFIG.PRO_REPORTS_PER_MONTH - used;
-  const bonus = await getFreeBonus(serverId);
-  return (CONFIG.FREE_REPORTS + bonus) - used;
-}
-
-async function incrementUsage(serverId) {
-  if (await isTester(serverId)) return;
-  try {
-    const { data } = await supabase.from('usage').select('reports_used').eq('server_id', serverId).single();
-    if (data) {
-      await supabase.from('usage').update({ reports_used: (data.reports_used || 0) + 1 }).eq('server_id', serverId);
+    if (status.usageExists) {
+      await supabase.from('usage').update({ reports_used: status.reportsUsed + 1 }).eq('server_id', serverId);
     } else {
       await supabase.from('usage').insert({ server_id: serverId, reports_used: 1, month_start: new Date().toISOString() });
     }
@@ -234,6 +250,7 @@ async function incrementUsage(serverId) {
     serverUsage.get(serverId).reportsUsed++;
   }
 }
+
 
 function isOnCooldown(userId) {
   const last = cooldowns.get(userId);
@@ -1255,8 +1272,8 @@ async function handleVibeCommand(interaction) {
   const isPrivate = visibility === 'private';
   const isPublic = !isPrivate;
 
-  const serverIsPaid = await isPaid(serverId);
-  const tester = await isTester(serverId);
+  const status = await getServerStatus(serverId);
+  const { isTester: tester, isPaid: serverIsPaid, canUse, remaining: initialRemaining, subDaysLeft } = status;
 
   // Collect channels
   const rawChannels = [
@@ -1277,11 +1294,9 @@ async function handleVibeCommand(interaction) {
   }
 
   // Trial / limit check
-  if (!tester && !(await canUseBot(serverId))) {
+  if (!tester && !canUse) {
     if (serverIsPaid) {
-      const { data: usageData } = await supabase.from('usage').select('month_start').eq('server_id', serverId).single();
-      const monthStart = usageData?.month_start ? new Date(usageData.month_start) : new Date();
-      const daysUntilReset = Math.max(1, Math.ceil(30 - ((Date.now() - monthStart.getTime()) / (1000 * 60 * 60 * 24))));
+      const daysUntilReset = Math.max(1, 30 - Math.round((Date.now() - (status.monthStart || Date.now())) / (1000 * 60 * 60 * 24)));
       return interaction.reply({
         embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Monthly Limit Reached')
           .setDescription(`You've used all **${CONFIG.PRO_REPORTS_PER_MONTH} reports** this month.\nResets in **${daysUntilReset} day${daysUntilReset === 1 ? '' : 's'}**.`)
@@ -1289,7 +1304,10 @@ async function handleVibeCommand(interaction) {
         ephemeral: true
       });
     } else {
-      await sendTrialEndedEmail(serverName, serverId, interaction.user.tag);
+      if (!trialEndedNotified.has(serverId)) {
+        trialEndedNotified.add(serverId);
+        await sendTrialEndedEmail(serverName, serverId, interaction.user.tag);
+      }
       return interaction.reply({
         embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Free Trial Ended')
           .setDescription(`You've used all **${CONFIG.FREE_REPORTS}** free reports.`)
@@ -1402,8 +1420,8 @@ async function handleVibeCommand(interaction) {
       channelReactions[chName] = await getChannelStats(interaction.guild, ch);
     }
 
-    await incrementUsage(serverId);
-    const remaining = await getReportsRemaining(serverId);
+    await incrementUsage(serverId, status);
+    const remaining = Math.max(0, initialRemaining - 1);
 
     const reportEmbed = buildReportEmbed(
       result, totalAnalyzed, channelNames,
@@ -1444,8 +1462,8 @@ async function handleVibeCommand(interaction) {
     await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totalAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length || 0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cost: totalCost, processingTime: totalProcessingTime });
     await sendEmailReport(serverName, serverId, channelNames, result, totalAnalyzed, timeframeLabel, sensitivity, remaining);
 
-    const usedNow = await getReportsUsed(serverId);
-    if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
+    const usedNow = status.reportsUsed + 1;
+    if (usedNow === 1 && !serverIsPaid && !tester) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
 
     if (usedNow % 5 === 0 && usedNow > 0) {
       await interaction.followUp({
@@ -1462,18 +1480,15 @@ async function handleVibeCommand(interaction) {
       });
     }
 
-    if (serverIsPaid) {
-      const subStatus = await getSubscriptionStatus(serverId);
-      if (subStatus.isActive && subStatus.daysLeft <= 7) {
-        await interaction.followUp({
-          embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('⏰ Subscription Expiring Soon').setDescription(`Your Pro subscription expires in **${subStatus.daysLeft} day${subStatus.daysLeft === 1 ? '' : 's'}**!\n\nRenew to keep access.`)],
-          components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setLabel('🔄 Renew Monthly --- $8.99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
-            ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('💎 Renew Yearly --- $99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
-          )],
-          ephemeral: true
-        });
-      }
+    if (serverIsPaid && subDaysLeft <= 7 && subDaysLeft > 0) {
+      await interaction.followUp({
+        embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('⏰ Subscription Expiring Soon').setDescription(`Your Pro subscription expires in **${subDaysLeft} day${subDaysLeft === 1 ? '' : 's'}**!\n\nRenew to keep access.`)],
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('🔄 Renew Monthly --- $8.99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
+          ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('💎 Renew Yearly --- $99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
+        )],
+        ephemeral: true
+      });
     }
 
   } catch (err) {
@@ -1567,7 +1582,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       if (filteredReports.length < 2) return 'Only one report so far — run `/vibe` again to start tracking trends.';
       if (scoreDiff >= 2)    return `🚀 **Major improvement!** Community jumped **${diffStr} pts**. Something is working — keep it up.`;
       if (scoreDiff >= 0.5)  return `📈 **Trending upward** by **${diffStr} pts**. Moderation efforts are paying off.`;
-      if (scoreDiff === 0)   return `➡️ **Holding steady** at **${latestScore}/10**. Community is stable.`;
+      if (scoreDiff >= 0)    return `➡️ **Holding steady** at **${latestScore}/10**. Community is stable.`;
       if (scoreDiff >= -0.5) return `⚠️ **Slight dip** of **${diffStr} pts**. Keep an eye on flagged messages.`;
       if (scoreDiff >= -2)   return `📉 **Score dropped ${diffStr} pts**. Review recent flagged messages and remind members of the rules.`;
       return `🚨 **Significant drop of ${diffStr} pts**. Immediate moderation attention recommended.`;
