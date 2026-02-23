@@ -732,6 +732,11 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
       `*${communityDesc}*`
     );
 
+  // ── SERVER MEMBERS ────────────────────────────────────────────
+  if (stats?.totalMembers) {
+    embed.addFields({ name: '📋 Channel Info', value: `👥 Server members: **${stats.totalMembers.toLocaleString()}**`, inline: false });
+  }
+
   // ── CHANNEL SCOREBOARD (multi only) ──────────────────────────
   if (isMulti) {
     const validChs = channelNames.filter(ch => channelResults[ch]);
@@ -1390,7 +1395,7 @@ async function handleVibeCommand(interaction) {
     const reportEmbed = buildReportEmbed(
       result, totalAnalyzed, channelNames,
       timeframeLabel, sensitivity, remaining, serverIsPaid,
-      channelReactions, null, isPublic, channelMsgCounts, channelResults
+      channelReactions, channelReactions[channelNames[0]], isPublic, channelMsgCounts, channelResults
     );
 
     const buttons = new ActionRowBuilder().addComponents(
@@ -1586,6 +1591,24 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       )
       .addFields(
         { name: '🎯 Trend Analysis', value: trendDesc, inline: false },
+        {
+          name: '🔍 Community Health Analysis',
+          value: (() => {
+            const lines = [];
+            if (latestScore >= 8) lines.push(`✨ **Thriving Community** — Your server is in excellent health with a score of ${latestScore}/10.`);
+            else if (latestScore >= 6) lines.push(`👍 **Healthy Community** — Your server is generally positive at ${latestScore}/10.`);
+            else if (latestScore >= 4) lines.push(`⚠️ **Mixed Atmosphere** — Your server score of ${latestScore}/10 suggests room for improvement.`);
+            else lines.push(`🚨 **Needs Attention** — A score of ${latestScore}/10 indicates significant toxicity issues.`);
+            if (lastFPct >= 70) lines.push(`🟢 **${lastFPct}% of messages are friendly** — your community is welcoming to new members.`);
+            else if (lastFPct >= 50) lines.push(`🟡 **${lastFPct}% friendly messages** — most interactions are positive but there's room to grow.`);
+            else lines.push(`🔴 **Only ${lastFPct}% friendly messages** — consider posting community guidelines and increasing moderation.`);
+            if (scoreDiff > 0) lines.push(`📈 Score improved by **${diffStr} pts** since first report — your efforts are working!`);
+            else if (scoreDiff < 0) lines.push(`📉 Score dropped by **${diffStr} pts** — recent events may have impacted community health.`);
+            if (toxEntries.length > 0) lines.push(`⚠️ Most common issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} instances across all reports).`);
+            return lines.join('\n');
+          })(),
+          inline: false
+        },
         {
           name: '💬 Sentiment (latest)',
           value:
