@@ -379,7 +379,7 @@ Analyze these ${analyzedCount} messages from ${channelNames.join(', ')} (last ${
 RULES:
 - sentiment counts (friendly + neutral + unfriendly) MUST add up to exactly ${analyzedCount}
 - Each message belongs to exactly ONE category
-- Flag ALL unfriendly messages --- do not limit to top 5
+- Flag unfriendly messages — include up to 20 of the most severe ones
 - Understand messages in ANY language --- translate mentally before judging
 - Provide specific, actionable AI recommendations
 
@@ -424,7 +424,7 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
-        max_tokens: 2000
+        max_tokens: 4000
       });
       break;
     } catch (err) {
@@ -456,7 +456,10 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
   result.friendlinessScore = clamp(result.friendlinessScore, 0, 10);
 
   const sentimentTotal = result.sentiment.friendly + result.sentiment.neutral + result.sentiment.unfriendly;
-  if (sentimentTotal !== analyzedCount) {
+  if (sentimentTotal === 0) {
+    // GPT returned all zeros — distribute evenly rather than divide by zero
+    result.sentiment.neutral = analyzedCount;
+  } else if (sentimentTotal !== analyzedCount) {
     const scale = analyzedCount / sentimentTotal;
     result.sentiment.friendly = Math.round(result.sentiment.friendly * scale);
     result.sentiment.neutral = Math.round(result.sentiment.neutral * scale);
@@ -473,7 +476,7 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
 function clamp(val, min, max) { return Math.min(Math.max(Number(val) || 0, min), max); }
 
 function buildScoreBar(score) {
-  const filled = Math.round(score);
+  const filled = Math.min(10, Math.max(0, Math.round(Number(score) || 0)));
   return '█'.repeat(filled) + '░'.repeat(10 - filled);
 }
 
