@@ -11,31 +11,3 @@
     "dotenv": "^16.3.1"
   }
 }
-```
-
----
-
-## Step 3: Deploy on Railway
-
-1. Go to [railway.app](https://railway.app) → **New Project → GitHub Repository**
-2. Select your `vibecheck-v2` repo
-3. Go to **Variables** tab → Add these:
-
-| Name | Value |
-|------|-------|
-| `DISCORD_TOKEN` | *(new bot token from Step 1)* |
-| `CLIENT_ID` | *(new Client ID from Step 1)* |
-| `OPENAI_API_KEY` | *(same as old bot)* |
-| `SUPABASE_URL` | *(same as old bot)* |
-| `SUPABASE_KEY` | *(same as old bot)* |
-| `RESEND_API_KEY` | *(same as old bot)* |
-
-4. Click **Deploy**
-
----
-
-## Step 4: Invite the New Bot to Your Test Server
-
-Once deployed, use this invite link (replace `YOUR_NEW_CLIENT_ID`):
-```
-https://discord.com/oauth2/authorize?client_id=YOUR_NEW_CLIENT_ID&permissions=2147552256&integration_type=0&scope=bot+applications.commands
