@@ -471,116 +471,440 @@ function scoreLabel(score) {
 }
 
 // ============================================================
+// QUICKCHART GRAPH GENERATORS
+// ============================================================
+
+// Chart 1: Score + Flagged trend (dual-axis line chart)
+function generateScoreTrendChart(reports) {
+  if (!reports || reports.length < 2) return null;
+  const chron = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const labels = chron.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const scores  = chron.map(r => clamp(parseFloat(r.score) || 0, 0, 10));
+  const flagged = chron.map(r => Math.max(0, r.flagged_count || 0));
+
+  const config = {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Health Score',
+          data: scores,
+          borderColor: '#22c55e',
+          backgroundColor: 'rgba(34,197,94,0.15)',
+          fill: true,
+          tension: 0.4,
+          pointBackgroundColor: scores.map(s => s >= 7 ? '#22c55e' : s >= 4 ? '#f59e0b' : '#ef4444'),
+          pointRadius: 5,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Flagged Messages',
+          data: flagged,
+          borderColor: '#ef4444',
+          backgroundColor: 'rgba(239,68,68,0.1)',
+          fill: false,
+          tension: 0.4,
+          borderDash: [5, 3],
+          pointBackgroundColor: '#ef4444',
+          pointRadius: 4,
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      plugins: {
+        title: { display: true, text: '📊 Community Health Trend', font: { size: 16, weight: 'bold' }, color: '#111827' },
+        legend: { position: 'bottom', labels: { color: '#374151', font: { size: 12 } } }
+      },
+      scales: {
+        y:  { type: 'linear', position: 'left',  min: 0, max: 10, title: { display: true, text: 'Score /10', color: '#22c55e' }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        y1: { type: 'linear', position: 'right', min: 0, title: { display: true, text: 'Flagged',   color: '#ef4444' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=700&h=320&bkg=%23ffffff`;
+}
+
+// Chart 2: Friendly vs Unfriendly sentiment over time (stacked area)
+function generateSentimentTrendChart(reports) {
+  if (!reports || reports.length < 2) return null;
+  const chron = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const labels     = chron.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const friendly   = chron.map(r => { const t = (r.friendly||0)+(r.neutral||0)+(r.unfriendly||0); return t > 0 ? Math.round((r.friendly||0)/t*100) : 0; });
+  const neutral    = chron.map(r => { const t = (r.friendly||0)+(r.neutral||0)+(r.unfriendly||0); return t > 0 ? Math.round((r.neutral||0)/t*100) : 0; });
+  const unfriendly = chron.map(r => { const t = (r.friendly||0)+(r.neutral||0)+(r.unfriendly||0); return t > 0 ? Math.round((r.unfriendly||0)/t*100) : 0; });
+
+  const config = {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: '🟢 Friendly %',   data: friendly,   borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.25)',  fill: true, tension: 0.4 },
+        { label: '⚪ Neutral %',    data: neutral,    borderColor: '#9ca3af', backgroundColor: 'rgba(156,163,175,0.15)', fill: true, tension: 0.4 },
+        { label: '🔴 Unfriendly %', data: unfriendly, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.2)',   fill: true, tension: 0.4 }
+      ]
+    },
+    options: {
+      plugins: {
+        title: { display: true, text: '💬 Sentiment Evolution', font: { size: 16, weight: 'bold' }, color: '#111827' },
+        legend: { position: 'bottom', labels: { color: '#374151', font: { size: 12 } } }
+      },
+      scales: {
+        y: { min: 0, max: 100, title: { display: true, text: 'Percentage %', color: '#374151' }, grid: { color: 'rgba(0,0,0,0.06)' } }
+      }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=700&h=300&bkg=%23ffffff`;
+}
+
+// Chart 3: Cumulative toxicity types — doughnut
+function generateToxicityDoughnut(toxMap) {
+  if (!toxMap || Object.keys(toxMap).length === 0) return null;
+  const sorted = Object.entries(toxMap).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]).slice(0, 7);
+  if (sorted.length === 0) return null;
+  const labels = sorted.map(([k]) => k);
+  const data   = sorted.map(([,v]) => v);
+  const colors = ['#ef4444','#f97316','#f59e0b','#eab308','#84cc16','#22c55e','#3b82f6'];
+
+  const config = {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: colors.slice(0, data.length), borderWidth: 2, borderColor: '#ffffff' }]
+    },
+    options: {
+      plugins: {
+        title: { display: true, text: '⚠️ Cumulative Toxicity Breakdown', font: { size: 16, weight: 'bold' }, color: '#111827' },
+        legend: { position: 'right', labels: { color: '#374151', font: { size: 12 } } }
+      }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=500&h=280&bkg=%23ffffff`;
+}
+
+// Chart 4: Per-channel health ranking — horizontal bar
+function generateChannelRankingChart(channelStats) {
+  // channelStats: { '#general': { latestScore, reportCount }, ... }
+  if (!channelStats || Object.keys(channelStats).length < 2) return null;
+  const sorted = Object.entries(channelStats)
+    .sort((a,b) => b[1].latestScore - a[1].latestScore)
+    .slice(0, 8);
+  const labels = sorted.map(([ch]) => ch);
+  const scores = sorted.map(([,s]) => s.latestScore);
+  const colors = scores.map(s => s >= 7 ? '#22c55e' : s >= 4 ? '#f59e0b' : '#ef4444');
+
+  const config = {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ label: 'Latest Score', data: scores, backgroundColor: colors, borderRadius: 5 }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        title: { display: true, text: '📍 Channel Health Ranking', font: { size: 16, weight: 'bold' }, color: '#111827' },
+        legend: { display: false }
+      },
+      scales: {
+        x: { min: 0, max: 10, title: { display: true, text: 'Score /10', color: '#374151' }, grid: { color: 'rgba(0,0,0,0.06)' } },
+        y: { grid: { display: false }, ticks: { color: '#374151', font: { size: 12 } } }
+      }
+    }
+  };
+  const height = 60 + sorted.length * 36;
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=600&h=${height}&bkg=%23ffffff`;
+}
+
+// Chart 5: Toxicity type evolution — stacked bar over time
+function generateToxicityEvolutionChart(reports) {
+  if (!reports || reports.length < 2) return null;
+  const chron = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const labels = chron.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+
+  // Collect all tox types across all reports
+  const allTypes = new Set();
+  chron.forEach(r => {
+    try {
+      const t = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+      if (t) Object.keys(t).forEach(k => allTypes.add(k));
+    } catch {}
+  });
+  const types = [...allTypes].slice(0, 5); // top 5 types
+  if (types.length === 0) return null;
+
+  const palette = ['#ef4444','#f97316','#f59e0b','#3b82f6','#8b5cf6'];
+  const datasets = types.map((type, i) => ({
+    label: type,
+    data: chron.map(r => {
+      try {
+        const t = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+        return t?.[type] || 0;
+      } catch { return 0; }
+    }),
+    backgroundColor: palette[i],
+    borderRadius: 3
+  }));
+
+  const config = {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      plugins: {
+        title: { display: true, text: '🧪 Toxicity Type Evolution', font: { size: 16, weight: 'bold' }, color: '#111827' },
+        legend: { position: 'bottom', labels: { color: '#374151', font: { size: 11 } } }
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { color: '#374151' } },
+        y: { stacked: true, title: { display: true, text: 'Count', color: '#374151' }, grid: { color: 'rgba(0,0,0,0.06)' } }
+      }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=700&h=300&bkg=%23ffffff`;
+}
+
+// Simple linear regression prediction
+function predictNextScore(reports) {
+  if (!reports || reports.length < 3) return null;
+  const chron = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const n = chron.length;
+  const xs = chron.map((_, i) => i);
+  const ys = chron.map(r => parseFloat(r.score) || 0);
+  const xMean = xs.reduce((s,x) => s+x, 0) / n;
+  const yMean = ys.reduce((s,y) => s+y, 0) / n;
+  const slope = xs.reduce((s,x,i) => s + (x-xMean)*(ys[i]-yMean), 0) / xs.reduce((s,x) => s + (x-xMean)**2, 0);
+  const intercept = yMean - slope * xMean;
+  const predicted = clamp(parseFloat((slope * n + intercept).toFixed(1)), 0, 10);
+  const direction = slope > 0.05 ? '📈 improving' : slope < -0.05 ? '📉 declining' : '➡️ stable';
+  return { predicted, slope: parseFloat(slope.toFixed(3)), direction };
+}
+
+// ============================================================
 // BUILD DISCORD EMBED REPORT
 // ============================================================
 
-function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions = null, stats = null, isPublic = false, channelMsgCounts = {}, channelResults = {}) {
+// Helper: build a compact toxicity bar string for a result
+function buildToxBars(toxicityTypes, maxBars = 8) {
+  if (!toxicityTypes) return null;
+  const entries = Object.entries(toxicityTypes).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return null;
+  const maxVal = entries[0][1] || 1;
+  return entries.map(([k, v]) => {
+    const filled = Math.round((v / maxVal) * maxBars);
+    return `\`${'█'.repeat(filled)}${'░'.repeat(maxBars - filled)}\` **${k}** ${v}`;
+  }).join('\n');
+}
+
+// Helper: build a compact sentiment bar row
+function sentimentRow(label, emoji, count, total) {
+  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+  const filled = Math.round(pct / 10);
+  return `${emoji} ${label.padEnd(10)} \`${String(count).padStart(4)}\` ${String(pct).padStart(3)}% ${'█'.repeat(filled)}${'░'.repeat(10 - filled)}`;
+}
+
+// Helper: format reaction highlights for one channel
+function formatReactions(reactions) {
+  if (!reactions) return null;
+  const lines = [];
+  if (reactions.mostReacted)  lines.push(`⭐ **Top reacted:** "${reactions.mostReacted.text.substring(0, 60)}" — ${reactions.mostReacted.reactions}`);
+  if (reactions.mostPositive) lines.push(`👍 **Most positive:** "${reactions.mostPositive.text.substring(0, 60)}" — ${reactions.mostPositive.reactions}`);
+  if (reactions.mostNegative) lines.push(`👎 **Most negative:** "${reactions.mostNegative.text.substring(0, 60)}" — ${reactions.mostNegative.reactions}`);
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, channelReactions = {}, stats = null, isPublic = false, channelMsgCounts = {}, channelResults = {}) {
   const score = result.friendlinessScore;
   const bar = buildScoreBar(score);
-  const { friendly, neutral, unfriendly } = result.sentiment;
-  const total = friendly + neutral + unfriendly;
-  const friendlyPct = Math.round((friendly / total) * 100);
-  const neutralPct = Math.round((neutral / total) * 100);
-  const unfriendlyPct = Math.round((unfriendly / total) * 100);
-  const channelDisplay = channelNames.length === 1 ? channelNames[0] : channelNames.join(', ');
-  const communityDesc = score >= 8 ? 'Your community is thriving and welcoming.'
-    : score >= 6 ? 'Your community is generally positive.'
-    : score >= 4 ? 'Your community has a mixed atmosphere.'
-    : 'Your community needs attention.';
+  const isMulti = channelNames.length > 1;
+  const sensitivityLabel = sensitivity.charAt(0).toUpperCase() + sensitivity.slice(1);
+  const communityDesc = score >= 8 ? 'Your community is thriving and welcoming! 🎉'
+    : score >= 6 ? 'Your community is generally positive. 👍'
+    : score >= 4 ? 'Your community has a mixed atmosphere. ⚠️'
+    : 'Your community needs immediate attention. 🚨';
 
   const embed = new EmbedBuilder()
     .setColor(scoreColor(score))
-    .setTitle(channelNames.length > 1 ? `📊 Multi-Channel Vibe Report` : `📊 Community Vibe Report`)
+    .setTitle(isMulti ? '📊 Multi-Channel Vibe Report' : '📊 Community Vibe Report')
     .setDescription(
-      `**${channelDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages • Sensitivity: **${sensitivity.charAt(0).toUpperCase() + sensitivity.slice(1)}**\n\n` +
-      `${scoreEmoji(score)} **Friendliness Score: ${score}/10** --- ${scoreLabel(score)}\n` +
+      `**${isMulti ? `${channelNames.length} channels` : channelNames[0]}** • Last ${timeframeLabel} • **${analyzedCount}** messages • Sensitivity: **${sensitivityLabel}**\n\n` +
+      `${scoreEmoji(score)} **Overall Score: ${score}/10 — ${scoreLabel(score)}**\n` +
       `\`${bar}\`\n` +
       `*${communityDesc}*`
     );
 
-  if (stats) {
-    embed.addFields({ name: '📋 Channel Info', value: `👥 Server members: **${stats.totalMembers}**`, inline: false });
-  }
+  // ── CHANNEL SCOREBOARD (multi only) ──────────────────────────
+  if (isMulti) {
+    const validChs = channelNames.filter(ch => channelResults[ch]);
+    const sortedChs = [...validChs].sort((a, b) =>
+      channelResults[b].result.friendlinessScore - channelResults[a].result.friendlinessScore
+    );
 
-  if (channelNames.length > 1) {
-    const chScoreLines = channelNames.map(ch => {
+    // Scoreboard table
+    const tableLines = ['```'];
+    tableLines.push('Channel        Score  Msgs   Health');
+    tableLines.push('─'.repeat(37));
+    sortedChs.forEach(ch => {
       const res = channelResults[ch];
-      if (!res) return `${ch} --- not enough data`;
       const chScore = res.result.friendlinessScore;
       const chBar = '█'.repeat(Math.round(chScore)) + '░'.repeat(10 - Math.round(chScore));
-      const chEmoji = chScore >= 7 ? '🟢' : chScore >= 4 ? '🟡' : '🔴';
-      const msgCount = channelMsgCounts[ch] || 0;
-      return `${chEmoji} **${ch}** \`${chBar}\` **${chScore}/10** (${msgCount} msgs)`;
+      const chEmoji = chScore >= 7 ? '✓' : chScore >= 4 ? '~' : '✗';
+      const chName = ch.padEnd(14).substring(0, 14);
+      const msgCount = String(channelMsgCounts[ch] || 0).padStart(4);
+      tableLines.push(`${chName} ${String(chScore).padStart(5)}  ${msgCount}   ${chBar} ${chEmoji}`);
     });
-    embed.addFields({
-      name: `⚡ Impact Score: ${score}/10 --- Per-Channel Breakdown`,
-      value: chScoreLines.join('\n'),
-      inline: false
-    });
+    tableLines.push('─'.repeat(37));
+    const overallBar = '█'.repeat(Math.round(score)) + '░'.repeat(10 - Math.round(score));
+    tableLines.push(`${'OVERALL'.padEnd(14)} ${String(score).padStart(5)}  ${String(analyzedCount).padStart(4)}   ${overallBar} ★`);
+    tableLines.push('```');
+    embed.addFields({ name: '🏆 Channel Scoreboard', value: tableLines.join('\n'), inline: false });
   }
 
+  // ── OVERALL SENTIMENT ─────────────────────────────────────────
+  const { friendly, neutral, unfriendly } = result.sentiment;
+  const sentTotal = friendly + neutral + unfriendly || 1;
   embed.addFields({
-    name: '💬 Sentiment Breakdown',
+    name: '💬 Overall Sentiment',
     value:
-      `🟢 Friendly \`${String(friendly).padStart(4)}\` ${friendlyPct}% ${'█'.repeat(Math.round(friendlyPct / 10))}${'░'.repeat(10 - Math.round(friendlyPct / 10))}\n` +
-      `⚪ Neutral  \`${String(neutral).padStart(4)}\` ${neutralPct}% ${'█'.repeat(Math.round(neutralPct / 10))}${'░'.repeat(10 - Math.round(neutralPct / 10))}\n` +
-      `🔴 Unfriendly \`${String(unfriendly).padStart(4)}\` ${unfriendlyPct}% ${'█'.repeat(Math.round(unfriendlyPct / 10))}${'░'.repeat(10 - Math.round(unfriendlyPct / 10))}`,
+      sentimentRow('Friendly', '🟢', friendly, sentTotal) + '\n' +
+      sentimentRow('Neutral', '⚪', neutral, sentTotal) + '\n' +
+      sentimentRow('Unfriendly', '🔴', unfriendly, sentTotal),
     inline: false
   });
 
+  // ── PER-CHANNEL SENTIMENT COMPARISON (multi only) ────────────
+  if (isMulti) {
+    const validChs = channelNames.filter(ch => channelResults[ch]);
+    const sentLines = validChs.map(ch => {
+      const res = channelResults[ch];
+      const chSent = res.result.sentiment;
+      const chTotal = chSent.friendly + chSent.neutral + chSent.unfriendly || 1;
+      const fPct = Math.round((chSent.friendly / chTotal) * 100);
+      const uPct = Math.round((chSent.unfriendly / chTotal) * 100);
+      const fBar = '█'.repeat(Math.round(fPct / 10)) + '░'.repeat(10 - Math.round(fPct / 10));
+      const chEmoji = res.result.friendlinessScore >= 7 ? '🟢' : res.result.friendlinessScore >= 4 ? '🟡' : '🔴';
+      return `${chEmoji} **${ch}**\n` +
+             `  🟢 \`${fBar}\` ${fPct}% friendly   🔴 ${uPct}% unfriendly`;
+    });
+    embed.addFields({ name: '📊 Sentiment by Channel', value: sentLines.join('\n'), inline: false });
+  }
+
+  // ── OVERALL TOXICITY ──────────────────────────────────────────
+  const totalFlagged = result.flaggedMessages?.length || 0;
+  const overallToxBars = buildToxBars(result.toxicityTypes);
+
   if (isPublic) {
-    const flaggedCount = result.flaggedMessages?.length || 0;
-    if (flaggedCount > 0) {
-      const typeBreakdown = result.toxicityTypes
-        ? Object.entries(result.toxicityTypes).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([k, v]) => `• ${k}: ${v}`).join('\n')
-        : 'See full report for details.';
-      embed.addFields({ name: `⚠️ Toxicity Summary (${flaggedCount} flagged)`, value: typeBreakdown.substring(0, 1024) || 'Types unavailable.', inline: false });
+    // Public: show only counts, no message text
+    if (totalFlagged > 0) {
+      embed.addFields({
+        name: `⚠️ Overall Toxicity — ${totalFlagged} flagged`,
+        value: overallToxBars || 'No type breakdown available.',
+        inline: false
+      });
     } else {
-      embed.addFields({ name: '✅ No Flagged Content', value: 'No harmful content detected.', inline: false });
+      embed.addFields({ name: '✅ No Toxic Content Detected', value: 'All messages passed analysis.', inline: false });
     }
   } else {
-    if (result.toxicityTypes && Object.keys(result.toxicityTypes).length > 0) {
-      const types = Object.entries(result.toxicityTypes).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-      const maxVal = types[0]?.[1] || 1;
-      const bars = types.map(([k, v]) => {
-        const filled = Math.round((v / maxVal) * 8);
-        const bar = '█'.repeat(filled) + '░'.repeat(8 - filled);
-        return `\`${bar}\` ${k}: ${v}`;
-      }).join('\n');
-      embed.addFields({ name: '🧪 Toxicity Breakdown', value: bars, inline: false });
-    }
-
-    if (result.flaggedMessages && result.flaggedMessages.length > 0) {
-      const flaggedList = result.flaggedMessages
-        .sort((a, b) => b.severity - a.severity)
-        .slice(0, 10)
-        .map(f => `• [\`${f.type}\` ${f.severity}/10] ${f.message.substring(0, 80)}${f.message.length > 80 ? '...' : ''}`)
-        .join('\n');
-      embed.addFields({ name: `⚠️ Flagged Messages (${result.flaggedMessages.length})`, value: flaggedList.substring(0, 1024), inline: false });
-      if (result.flaggedMessages.length > 10) {
-        embed.addFields({ name: '', value: `_...and ${result.flaggedMessages.length - 10} more in the email report_`, inline: false });
-      }
+    // Private: full toxicity bars + flagged messages
+    if (overallToxBars) {
+      embed.addFields({ name: `🧪 Overall Toxicity — ${totalFlagged} flagged`, value: overallToxBars, inline: false });
     } else {
-      embed.addFields({ name: '✅ No Flagged Messages', value: 'No harmful content detected.', inline: false });
+      embed.addFields({ name: '✅ No Toxic Content Detected', value: 'All messages passed analysis.', inline: false });
+    }
+
+    if (totalFlagged > 0) {
+      const topFlagged = [...(result.flaggedMessages || [])]
+        .sort((a, b) => b.severity - a.severity)
+        .slice(0, isMulti ? 5 : 10)
+        .map(f => `• [\`${f.type}\` **${f.severity}/10**] ${f.message.substring(0, 75)}${f.message.length > 75 ? '…' : ''}`)
+        .join('\n');
+      embed.addFields({
+        name: `🚨 Most Severe Flagged Messages`,
+        value: topFlagged.substring(0, 1024) + (totalFlagged > (isMulti ? 5 : 10) ? `\n_…and ${totalFlagged - (isMulti ? 5 : 10)} more in the email report_` : ''),
+        inline: false
+      });
     }
   }
 
-  if (reactions && !isPublic) {
-    const reactionLines = [];
-    if (reactions.mostReacted) reactionLines.push(`⭐ **Most reacted:** "${reactions.mostReacted.text}" --- ${reactions.mostReacted.reactions}`);
-    if (reactions.mostPositive) reactionLines.push(`👍 **Most positive:** "${reactions.mostPositive.text}" --- ${reactions.mostPositive.reactions}`);
-    if (reactions.mostNegative) reactionLines.push(`👎 **Most negative:** "${reactions.mostNegative.text}" --- ${reactions.mostNegative.reactions}`);
-    if (reactionLines.length > 0) {
-      embed.addFields({ name: '💬 Most Reacted Comments', value: reactionLines.join('\n'), inline: false });
+  // ── OVERALL REACTIONS (single channel) ────────────────────────
+  if (!isMulti) {
+    const singleReactions = channelReactions[channelNames[0]];
+    const reactionText = formatReactions(singleReactions);
+    if (reactionText && !isPublic) {
+      embed.addFields({ name: '💬 Most Reacted Messages', value: reactionText, inline: false });
     }
   }
 
+  // ── PER-CHANNEL DEEP DIVE (multi only) ───────────────────────
+  if (isMulti && !isPublic) {
+    const validChs = channelNames.filter(ch => channelResults[ch]);
+    const worstFirst = [...validChs].sort((a, b) =>
+      channelResults[a].result.friendlinessScore - channelResults[b].result.friendlinessScore
+    );
+
+    for (const ch of worstFirst) {
+      const res = channelResults[ch];
+      const chScore = res.result.friendlinessScore;
+      const chBar = buildScoreBar(chScore);
+      const chEmoji = scoreEmoji(chScore);
+      const chFlagged = res.result.flaggedMessages || [];
+      const chMsgCount = channelMsgCounts[ch] || 0;
+
+      let chValue = `${chEmoji} **${chScore}/10** \`${chBar}\` — ${scoreLabel(chScore)} | **${chMsgCount}** msgs analyzed\n`;
+
+      // Toxicity bars for this channel
+      const chToxBars = buildToxBars(res.result.toxicityTypes, 6);
+      if (chToxBars) {
+        chValue += `\n🧪 **Toxicity** (${chFlagged.length} flagged)\n${chToxBars}\n`;
+      } else {
+        chValue += `\n✅ No toxicity detected\n`;
+      }
+
+      // Top 2 flagged messages for this channel
+      if (chFlagged.length > 0) {
+        const top2 = [...chFlagged].sort((a, b) => b.severity - a.severity).slice(0, 2);
+        chValue += `\n🚨 **Worst flagged:**\n`;
+        top2.forEach(f => {
+          chValue += `• [\`${f.type}\` ${f.severity}/10] ${f.message.substring(0, 65)}${f.message.length > 65 ? '…' : ''}\n`;
+        });
+      }
+
+      // Reactions for this channel
+      const chReactions = channelReactions[ch];
+      const reactionText = formatReactions(chReactions);
+      if (reactionText) {
+        chValue += `\n💬 **Reactions**\n${reactionText}`;
+      }
+
+      embed.addFields({
+        name: `🔍 ${ch}`,
+        value: chValue.substring(0, 1024),
+        inline: false
+      });
+    }
+  }
+
+  // ── PUBLIC MULTI-CHANNEL REACTIONS SUMMARY ────────────────────
+  if (isMulti && isPublic) {
+    const reactionSummary = channelNames
+      .filter(ch => channelReactions[ch])
+      .map(ch => {
+        const r = channelReactions[ch];
+        const lines = [];
+        if (r.mostReacted) lines.push(`⭐ "${r.mostReacted.text.substring(0, 45)}" — ${r.mostReacted.reactions}`);
+        return lines.length > 0 ? `**${ch}**\n${lines.join('\n')}` : null;
+      })
+      .filter(Boolean);
+    if (reactionSummary.length > 0) {
+      embed.addFields({ name: '💬 Top Reacted Messages by Channel', value: reactionSummary.join('\n\n').substring(0, 1024), inline: false });
+    }
+  }
+
+  // ── SUMMARY + RECOMMENDATION ──────────────────────────────────
   if (result.summary) {
     embed.addFields({ name: '🗒️ Vibe Insights', value: result.summary, inline: false });
   }
-
   if (result.recommendation) {
-    embed.addFields({ name: '💡 Vibe Check Bot Recommendations', value: result.recommendation, inline: false });
+    embed.addFields({ name: '💡 AI Recommendations', value: result.recommendation, inline: false });
   }
 
   embed.addFields({
@@ -591,7 +915,7 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
 
   const planType = isPaidServer ? '⚡ Pro' : '🎁 Free Trial';
   const reportWord = remaining === 1 ? 'report' : 'reports';
-  embed.setFooter({ text: `Vibe Check Bot • ${planType} • ${remaining} ${reportWord} remaining • Sensitivity: ${sensitivity}` });
+  embed.setFooter({ text: `Vibe Check Bot • ${planType} • ${remaining} ${reportWord} remaining • Sensitivity: ${sensitivityLabel}` });
 
   return embed;
 }
@@ -1053,7 +1377,12 @@ async function handleVibeCommand(interaction) {
       recommendation: combinedRec
     };
 
-    const reactionStats = await getChannelStats(interaction.guild, channels[0]);
+    // Fetch reactions for every channel
+    const channelReactions = {};
+    for (const ch of channels) {
+      const chName = `#${ch.name}`;
+      channelReactions[chName] = await getChannelStats(interaction.guild, ch);
+    }
 
     await incrementUsage(serverId);
     const remaining = await getReportsRemaining(serverId);
@@ -1061,7 +1390,7 @@ async function handleVibeCommand(interaction) {
     const reportEmbed = buildReportEmbed(
       result, totalAnalyzed, channelNames,
       timeframeLabel, sensitivity, remaining, serverIsPaid,
-      reactionStats, reactionStats, isPublic, channelMsgCounts, channelResults
+      channelReactions, null, isPublic, channelMsgCounts, channelResults
     );
 
     const buttons = new ActionRowBuilder().addComponents(
@@ -1156,7 +1485,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       return interaction.editReply('❌ No reports found. Run `/vibe` first to start tracking progress.');
     }
 
-    const sorted = [...reports].reverse();
+    const sorted = [...reports].reverse(); // oldest → newest
     let filteredReports = sorted;
     let filterLabel = '';
 
@@ -1169,132 +1498,178 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       }
     }
 
-    const latest = filteredReports[filteredReports.length - 1];
-    const oldest = filteredReports[0];
-    const avgScore = (filteredReports.reduce((sum, r) => sum + r.score, 0) / filteredReports.length).toFixed(1);
-    const scoreDiff = (latest.score - oldest.score).toFixed(1);
-    const trendArrow = scoreDiff > 0 ? `📈 +${scoreDiff}` : scoreDiff < 0 ? `📉 ${scoreDiff}` : '➡️ No change';
+    const latest      = filteredReports[filteredReports.length - 1];
+    const oldest      = filteredReports[0];
+    const latestScore = latest.score;
 
-    const graphLines = filteredReports.map(r => {
-      const date = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const bar = '█'.repeat(Math.round(r.score)) + '░'.repeat(10 - Math.round(r.score));
-      const dot = r.score >= 7 ? '🟢' : r.score >= 4 ? '🟡' : '🔴';
-      return `${dot} \`${date.padEnd(8)}\` \`${bar}\` **${r.score}** --- ${scoreLabel(r.score)}`;
-    });
+    // ── SHARED HELPERS ────────────────────────────────────────
+    const safeDiv    = (n, d) => d === 0 ? 0 : Math.round((n / d) * 100);
+    const avgScore   = (filteredReports.reduce((s, r) => s + r.score, 0) / filteredReports.length).toFixed(1);
+    const scoreDiff  = parseFloat((latestScore - oldest.score).toFixed(1));
+    const diffStr    = scoreDiff > 0 ? `+${scoreDiff}` : `${scoreDiff}`;
+    const trendEmoji = scoreDiff > 0 ? '📈' : scoreDiff < 0 ? '📉' : '➡️';
 
-    const trendDesc = (() => {
-      const diff = parseFloat(scoreDiff);
-      if (filteredReports.length < 2) return 'Only one report so far --- run `/vibe` again to start tracking trends.';
-      if (diff >= 2) return `🚀 Major improvement! Your community jumped **+${diff} points**. Something is working --- keep it up.`;
-      if (diff >= 0.5) return `📈 Trending upward by **+${diff} points**. Your moderation efforts are paying off.`;
-      if (diff === 0) return `➡️ Score is holding steady at **${latest.score}/10**. Community is stable.`;
-      if (diff >= -0.5) return `⚠️ Slight dip of **${diff} points**. Keep an eye on flagged messages.`;
-      if (diff >= -2) return `📉 Score dropped **${diff} points**. Consider reviewing recent flagged messages and reminding members of the rules.`;
-      return `🚨 Significant drop of **${diff} points**. Immediate moderation attention recommended.`;
-    })();
+    const newTotal = (latest.friendly||0)+(latest.neutral||0)+(latest.unfriendly||0) || 1;
+    const oldTotal = (oldest.friendly||0)+(oldest.neutral||0)+(oldest.unfriendly||0) || 1;
+    const lastFPct  = safeDiv(latest.friendly,   newTotal);
+    const lastNPct  = safeDiv(latest.neutral,     newTotal);
+    const lastUPct  = safeDiv(latest.unfriendly,  newTotal);
+    const firstFPct = safeDiv(oldest.friendly,    oldTotal);
+    const firstUPct = safeDiv(oldest.unfriendly,  oldTotal);
+    const firstFlagged = oldest.flagged_count  || 0;
+    const lastFlagged  = latest.flagged_count  || 0;
+    const flagDiff     = lastFlagged - firstFlagged;
 
-    const safeDiv = (n, d) => d === 0 ? 0 : Math.round((n / d) * 100);
-    const oldTotal = (oldest.friendly || 0) + (oldest.neutral || 0) + (oldest.unfriendly || 0);
-    const newTotal = (latest.friendly || 0) + (latest.neutral || 0) + (latest.unfriendly || 0);
-    const firstFriendlyPct = safeDiv(oldest.friendly, oldTotal);
-    const lastFriendlyPct = safeDiv(latest.friendly, newTotal);
-    const firstUnfriendlyPct = safeDiv(oldest.unfriendly, oldTotal);
-    const lastUnfriendlyPct = safeDiv(latest.unfriendly, newTotal);
-    const friendlyChange = lastFriendlyPct - firstFriendlyPct;
-    const unfriendlyChange = lastUnfriendlyPct - firstUnfriendlyPct;
-    const friendlyArrow = friendlyChange > 0 ? `🟢 ↑+${friendlyChange}%` : friendlyChange < 0 ? `🔴 ↓${friendlyChange}%` : `➡️ 0%`;
-    const unfriendlyArrow = unfriendlyChange > 0 ? `🔴 ↑+${unfriendlyChange}%` : unfriendlyChange < 0 ? `🟢 ↓${unfriendlyChange}%` : `➡️ 0%`;
-
+    // Cumulative tox map
     const toxMap = {};
     filteredReports.forEach(r => {
       try {
-        const types = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
-        if (types) Object.entries(types).forEach(([k, v]) => { toxMap[k] = (toxMap[k] || 0) + (v || 0); });
+        const t = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+        if (t) Object.entries(t).forEach(([k, v]) => { toxMap[k] = (toxMap[k] || 0) + (v || 0); });
       } catch {}
     });
-    const toxEntries = Object.entries(toxMap).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-    const maxTox = toxEntries[0]?.[1] || 1;
-    const toxBars = toxEntries.slice(0, 5).map(([k, v]) => {
-      const filled = Math.round((v / maxTox) * 8);
-      return `\`${'█'.repeat(filled)}${'░'.repeat(8 - filled)}\` **${k}**: ${v}`;
-    }).join('\n') || 'None detected ✅';
+    const toxEntries = Object.entries(toxMap).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);
 
-    const firstFlagged = oldest.flagged_count || 0;
-    const lastFlagged = latest.flagged_count || 0;
-    const flagDiff = lastFlagged - firstFlagged;
-    const flagTrend = flagDiff < 0 ? `✅ ↓ Down ${Math.abs(flagDiff)} (improving)` : flagDiff > 0 ? `⚠️ ↑ Up ${flagDiff} (needs attention)` : `➡️ Stable`;
-
-    const allChannelsInData = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
-    let perChannelField = null;
-    if (allChannelsInData.length > 1) {
-      const lines = allChannelsInData.map(chName => {
-        const chReports = sorted.filter(r => r.channel_name === chName);
-        if (chReports.length < 1) return null;
-        const chLatest = chReports[chReports.length - 1].score;
-        const chOldest = chReports[0].score;
-        const chDiff = (chLatest - chOldest).toFixed(1);
-        const arrow = chDiff > 0 ? `📈 +${chDiff}` : chDiff < 0 ? `📉 ${chDiff}` : '➡️ stable';
-        const dot = chLatest >= 7 ? '🟢' : chLatest >= 4 ? '🟡' : '🔴';
-        const bar = '█'.repeat(Math.round(chLatest)) + '░'.repeat(10 - Math.round(chLatest));
-        return `${dot} **${chName}** \`${bar}\` **${chLatest}/10** ${arrow}`;
-      }).filter(Boolean);
-      if (lines.length > 0) perChannelField = lines.join('\n');
-    }
-
-    const latestScore = latest.score;
-    const descriptiveAnalysis = (() => {
-      const lines = [];
-      if (latestScore >= 8) lines.push(`✨ **Thriving Community** --- Your server is in excellent health with a score of ${latestScore}/10.`);
-      else if (latestScore >= 6) lines.push(`👍 **Healthy Community** --- Your server is generally positive at ${latestScore}/10.`);
-      else if (latestScore >= 4) lines.push(`⚠️ **Mixed Atmosphere** --- Your server score of ${latestScore}/10 suggests room for improvement.`);
-      else lines.push(`🚨 **Needs Attention** --- A score of ${latestScore}/10 indicates significant toxicity issues.`);
-
-      if (lastFriendlyPct >= 70) lines.push(`🟢 **${lastFriendlyPct}% of messages are friendly** --- your community is welcoming to new members.`);
-      else if (lastFriendlyPct >= 50) lines.push(`🟡 **${lastFriendlyPct}% friendly messages** --- most interactions are positive but there's room to grow.`);
-      else lines.push(`🔴 **Only ${lastFriendlyPct}% friendly messages** --- consider posting community guidelines and increasing moderation.`);
-
-      if (parseFloat(scoreDiff) > 0) lines.push(`📈 Score improved by **+${scoreDiff} points** since first report --- your efforts are working!`);
-      else if (parseFloat(scoreDiff) < 0) lines.push(`📉 Score dropped by **${scoreDiff} points** --- recent events may have impacted community health.`);
-
-      if (toxEntries.length > 0) {
-        const [topType, topCount] = toxEntries[0];
-        lines.push(`⚠️ Most common issue: **${topType}** (${topCount} instances across all reports).`);
+    // Channel stats map for ranking chart
+    const allChannels = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
+    const channelStats = {};
+    allChannels.forEach(ch => {
+      const chReps = sorted.filter(r => r.channel_name === ch);
+      if (chReps.length > 0) {
+        channelStats[ch] = { latestScore: chReps[chReps.length-1].score, reportCount: chReps.length };
       }
-      return lines.join('\n');
+    });
+    const isMulti = Object.keys(channelStats).length > 1;
+
+    // Prediction
+    const prediction = predictNextScore(filteredReports);
+
+    // Trend description
+    const trendDesc = (() => {
+      if (filteredReports.length < 2) return 'Only one report so far — run `/vibe` again to start tracking trends.';
+      if (scoreDiff >= 2)    return `🚀 **Major improvement!** Community jumped **${diffStr} pts**. Something is working — keep it up.`;
+      if (scoreDiff >= 0.5)  return `📈 **Trending upward** by **${diffStr} pts**. Moderation efforts are paying off.`;
+      if (scoreDiff === 0)   return `➡️ **Holding steady** at **${latestScore}/10**. Community is stable.`;
+      if (scoreDiff >= -0.5) return `⚠️ **Slight dip** of **${diffStr} pts**. Keep an eye on flagged messages.`;
+      if (scoreDiff >= -2)   return `📉 **Score dropped ${diffStr} pts**. Review recent flagged messages and remind members of the rules.`;
+      return `🚨 **Significant drop of ${diffStr} pts**. Immediate moderation attention recommended.`;
     })();
 
+    // Recommendations
     const recommendations = [];
-    const diff = parseFloat(scoreDiff);
-    if (diff < -0.5) recommendations.push(`📉 Score dropped ${Math.abs(diff)} points --- post a community guidelines reminder and review recent flagged messages.`);
-    else if (diff > 0.5) recommendations.push(`📈 Great progress (+${diff} pts) --- keep current moderation. Consider highlighting positive contributors.`);
-    else recommendations.push(`➡️ Score is stable --- run a targeted /vibe on your lowest-performing channel to find improvement areas.`);
-    if (lastFlagged > firstFlagged) recommendations.push(`⚠️ Flagged messages increased (${firstFlagged} → ${lastFlagged}) --- consider stricter auto-mod rules or a warning post.`);
-    if (lastUnfriendlyPct > firstUnfriendlyPct) recommendations.push(`🔴 Unfriendly messages rose ${firstUnfriendlyPct}% → ${lastUnfriendlyPct}% --- a pinned reminder of community rules may help.`);
+    if (scoreDiff < -0.5) recommendations.push(`📉 Score dropped ${Math.abs(scoreDiff)} pts — post community guidelines and review flagged messages.`);
+    else if (scoreDiff > 0.5) recommendations.push(`📈 Great progress (${diffStr} pts) — keep current moderation. Consider highlighting positive contributors.`);
+    else recommendations.push(`➡️ Score is stable — run a targeted /vibe on your lowest-performing channel.`);
+    if (lastFlagged > firstFlagged) recommendations.push(`⚠️ Flagged messages increased (${firstFlagged} → ${lastFlagged}) — consider stricter auto-mod rules.`);
+    if (lastUPct > firstUPct) recommendations.push(`🔴 Unfriendly % rose ${firstUPct}% → ${lastUPct}% — a pinned community rules reminder may help.`);
+    if (toxEntries.length > 0) recommendations.push(`⚠️ Top recurring issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} total instances).`);
+    if (prediction) recommendations.push(`${prediction.direction === '📈 improving' ? '🟢' : prediction.direction === '📉 declining' ? '🔴' : '⚪'} **Predicted next score: ${prediction.predicted}/10** (trend: ${prediction.direction})`);
 
-    const embed = new EmbedBuilder()
-      .setColor(latestScore >= 7 ? 0x22c55e : latestScore >= 4 ? 0xf59e0b : 0xef4444)
-      .setTitle(`📈 Progress Report --- ${interaction.guild.name}`)
+    // ── GENERATE ALL CHART URLs ───────────────────────────────
+    const scoreTrendUrl   = generateScoreTrendChart(filteredReports);
+    const sentimentUrl    = generateSentimentTrendChart(filteredReports);
+    const toxDoughnutUrl  = generateToxicityDoughnut(toxMap);
+    const toxEvolutionUrl = generateToxicityEvolutionChart(filteredReports);
+    const channelRankUrl  = isMulti ? generateChannelRankingChart(channelStats) : null;
+
+    // ── EMBED 1: OVERALL SUMMARY + SCORE TREND CHART ─────────
+    const embed1 = new EmbedBuilder()
+      .setColor(scoreColor(latestScore))
+      .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
       .setDescription(
-        `**${filteredReports.length} report${filteredReports.length === 1 ? '' : 's'} analyzed**${filterLabel} • ` +
-        `First: **${oldest.score}/10** → Latest: **${latest.score}/10** • ${trendArrow}`
+        `**${filteredReports.length} report${filteredReports.length === 1 ? '' : 's'}**${filterLabel} • ` +
+        `First: **${oldest.score}/10** → Latest: **${latestScore}/10**\n\n` +
+        `${scoreEmoji(latestScore)} **Current: ${latestScore}/10 — ${scoreLabel(latestScore)}**\n` +
+        `\`${buildScoreBar(latestScore)}\`\n` +
+        `Avg: **${avgScore}/10** • Change: **${trendEmoji} ${diffStr}**` +
+        (prediction ? `\n🔮 **Next report prediction: ${prediction.predicted}/10** (${prediction.direction})` : '')
       )
       .addFields(
-        { name: '📊 Score History (oldest → newest)', value: graphLines.slice(-10).join('\n') || 'Not enough data', inline: false },
-        { name: '🎯 Trend Analysis', value: `**Average score:** ${avgScore}/10\n**Change:** ${trendArrow}\n\n${trendDesc}`, inline: false },
-        { name: '🔍 Community Health Analysis', value: descriptiveAnalysis, inline: false },
-        { name: '💬 Sentiment Evolution', value: `🟢 **Friendly:** ${firstFriendlyPct}% → ${lastFriendlyPct}% ${friendlyArrow}\n🔴 **Unfriendly:** ${firstUnfriendlyPct}% → ${lastUnfriendlyPct}% ${unfriendlyArrow}`, inline: false },
-        { name: '🚩 Flagged Messages', value: `First report: **${firstFlagged}** flagged | Latest: **${lastFlagged}** flagged\n${flagTrend}`, inline: false },
-        { name: '⚠️ Cumulative Toxicity Breakdown', value: toxBars, inline: false }
+        { name: '🎯 Trend Analysis', value: trendDesc, inline: false },
+        {
+          name: '💬 Sentiment (latest)',
+          value:
+            sentimentRow('Friendly',   '🟢', latest.friendly   || 0, newTotal) + `  _(was ${firstFPct}%${lastFPct-firstFPct !== 0 ? ` ${lastFPct-firstFPct > 0 ? '↑' : '↓'}${Math.abs(lastFPct-firstFPct)}%` : ''})_\n` +
+            sentimentRow('Neutral',    '⚪', latest.neutral    || 0, newTotal) + '\n' +
+            sentimentRow('Unfriendly', '🔴', latest.unfriendly || 0, newTotal) + `  _(was ${firstUPct}%${lastUPct-firstUPct !== 0 ? ` ${lastUPct-firstUPct > 0 ? '↑' : '↓'}${Math.abs(lastUPct-firstUPct)}%` : ''})_`,
+          inline: false
+        },
+        {
+          name: `🚩 Flagged Messages`,
+          value: `${firstFlagged} → ${lastFlagged} (${flagDiff < 0 ? `✅ ↓ Down ${Math.abs(flagDiff)}` : flagDiff > 0 ? `⚠️ ↑ Up ${flagDiff}` : `➡️ Stable`})`,
+          inline: true
+        },
+        {
+          name: '📋 Reports Span',
+          value: `${new Date(oldest.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} → ${new Date(latest.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
+          inline: true
+        }
       );
+    if (scoreTrendUrl) embed1.setImage(scoreTrendUrl);
 
-    if (perChannelField) {
-      embed.addFields({ name: '📺 Per-Channel Score Comparison', value: perChannelField, inline: false });
+    const embeds = [embed1];
+
+    // ── EMBED 2: SENTIMENT EVOLUTION CHART ───────────────────
+    if (sentimentUrl && filteredReports.length >= 2) {
+      const fChange = lastFPct - firstFPct;
+      const uChange = lastUPct - firstUPct;
+      const embed2 = new EmbedBuilder()
+        .setColor(0x3b82f6)
+        .setTitle('💬 Sentiment Evolution')
+        .setDescription(
+          `**Friendly:** ${firstFPct}% → ${lastFPct}% ${fChange > 0 ? `🟢 ↑+${fChange}%` : fChange < 0 ? `🔴 ↓${fChange}%` : '→ unchanged'}\n` +
+          `**Unfriendly:** ${firstUPct}% → ${lastUPct}% ${uChange > 0 ? `🔴 ↑+${uChange}%` : uChange < 0 ? `🟢 ↓${uChange}%` : '→ unchanged'}`
+        )
+        .setImage(sentimentUrl);
+      embeds.push(embed2);
     }
 
-    embed.addFields({ name: '💡 Vibe Check Bot Recommendations', value: recommendations.join('\n'), inline: false });
-    embed.setFooter({ text: `Vibe Check Bot • ${filteredReports.length} reports • Run /vibe regularly to build up your history` });
+    // ── EMBED 3: TOXICITY DOUGHNUT ────────────────────────────
+    if (toxDoughnutUrl) {
+      const toxSummary = toxEntries.slice(0, 5).map(([k, v]) => `• **${k}**: ${v}`).join('\n') || 'None detected ✅';
+      const embed3 = new EmbedBuilder()
+        .setColor(0xf97316)
+        .setTitle('⚠️ Cumulative Toxicity Breakdown')
+        .setDescription(`Across all ${filteredReports.length} reports:\n${toxSummary}`)
+        .setImage(toxDoughnutUrl);
+      embeds.push(embed3);
+    }
 
-    await interaction.editReply({ embeds: [embed] });
+    // ── EMBED 4: TOXICITY TYPE EVOLUTION ─────────────────────
+    if (toxEvolutionUrl && filteredReports.length >= 2) {
+      const embed4 = new EmbedBuilder()
+        .setColor(0xef4444)
+        .setTitle('🧪 Toxicity Type Evolution')
+        .setDescription('How each toxicity type changed across reports — stacked bars show volume per report.')
+        .setImage(toxEvolutionUrl);
+      embeds.push(embed4);
+    }
+
+    // ── EMBED 5: CHANNEL RANKING (multi only) ─────────────────
+    if (channelRankUrl) {
+      const rankLines = Object.entries(channelStats)
+        .sort((a,b) => b[1].latestScore - a[1].latestScore)
+        .map(([ch, s]) => `${scoreEmoji(s.latestScore)} **${ch}** — ${s.latestScore}/10 \`${buildScoreBar(s.latestScore)}\` (${s.reportCount} run${s.reportCount===1?'':'s'})`)
+        .join('\n');
+      const embed5 = new EmbedBuilder()
+        .setColor(0x8b5cf6)
+        .setTitle('📍 Channel Health Ranking')
+        .setDescription(rankLines)
+        .setImage(channelRankUrl);
+      embeds.push(embed5);
+    }
+
+    // ── EMBED 6: RECOMMENDATIONS ──────────────────────────────
+    const embedLast = new EmbedBuilder()
+      .setColor(scoreColor(latestScore))
+      .setTitle('💡 AI Recommendations')
+      .setDescription(recommendations.join('\n\n'))
+      .setFooter({ text: `Vibe Check Bot • ${filteredReports.length} report${filteredReports.length===1?'':'s'} • Run /vibe regularly to build your history` });
+    embeds.push(embedLast);
+
+    // ── SEND ALL EMBEDS ───────────────────────────────────────
+    // Discord allows max 10 embeds per message; we stay well under
+    await interaction.editReply({ embeds });
 
   } catch (err) {
     console.error('Progress error:', err);
