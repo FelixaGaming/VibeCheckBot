@@ -33,8 +33,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
-  PermissionFlagsBits
+  ChannelType
 } = require('discord.js');
 
 const OpenAI = require('openai');
@@ -53,7 +52,6 @@ const CONFIG = {
   FREE_MAX_CHANNELS: 1,
   PRO_MAX_CHANNELS: 5,
   MAX_OPENAI_CHARS: 30000,
-  MAX_OPENAI_MESSAGES_PER_CHANNEL: 200,
   STRIPE_MONTHLY_LINK: 'https://buy.stripe.com/fZu28k00n5s92Oqf4z4ow01',
   STRIPE_YEARLY_LINK: 'https://buy.stripe.com/bJebIUbJ56wd4Wye0v4ow03',
   CONTACT_EMAIL: 'play@felixagaming.com',
@@ -62,7 +60,6 @@ const CONFIG = {
   YEARLY_ENABLED: true,
   COOLDOWN_SECONDS: 15,
   SERVER_THROTTLE_PER_MINUTE: 10,
-  PENDING_COMMAND_TIMEOUT: 300000,
   COST_PER_1M_INPUT_TOKENS: 0.15,
   COST_PER_1M_OUTPUT_TOKENS: 0.60
 };
@@ -99,7 +96,7 @@ const SENSITIVITY_PROMPTS = {
 // ============================================================
 
 function validateEnvironment() {
-  const required = ['DISCORD_TOKEN', 'CLIENT_ID', 'OPENAI_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY'];
+  const required = ['DISCORD_TOKEN', 'CLIENT_ID', 'OPENAI_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY', 'RESEND_API_KEY'];
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) {
     console.error('❌ FATAL: Missing required environment variables:');
@@ -306,13 +303,16 @@ function canReadChannel(guild, channel) {
 
 async function fetchChannelMessages(channel, messageCount, timeframeMs) {
   const cutoffTime = Date.now() - timeframeMs;
+  const maxPages = Math.ceil(messageCount / 100) + 5; // cap: expected pages + 5 buffer for bot-heavy channels
   let allMessages = [];
   let lastId;
-  while (allMessages.length < messageCount) {
+  let pages = 0;
+  while (allMessages.length < messageCount && pages < maxPages) {
     const options = { limit: 100 };
     if (lastId) options.before = lastId;
     const fetched = await channel.messages.fetch(options);
     if (fetched.size === 0) break;
+    pages++;
     const filtered = fetched.filter(m =>
       !m.author.bot && m.content.length > 0 && m.createdTimestamp > cutoffTime
     );
@@ -648,15 +648,19 @@ function generateToxicityEvolutionChart(reports) {
   const chron = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const labels = chron.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
 
-  // Collect all tox types across all reports
-  const allTypes = new Set();
+  // Collect all tox types and rank by total count across all reports
+  const typeTotals = {};
   chron.forEach(r => {
     try {
       const t = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
-      if (t) Object.keys(t).forEach(k => allTypes.add(k));
+      if (t) Object.entries(t).forEach(([k, v]) => { typeTotals[k] = (typeTotals[k] || 0) + (v || 0); });
     } catch {}
   });
-  const types = [...allTypes].slice(0, 5); // top 5 types
+  const types = Object.entries(typeTotals)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([k]) => k);
   if (types.length === 0) return null;
 
   const palette = ['#ef4444','#f97316','#f59e0b','#3b82f6','#8b5cf6'];
@@ -738,7 +742,7 @@ function formatReactions(reactions) {
   return lines.length > 0 ? lines.join('\n') : null;
 }
 
-function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, channelReactions = {}, stats = null, isPublic = false, channelMsgCounts = {}, channelResults = {}) {
+function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, channelReactions = {}, stats = null, isPublic = false, channelMsgCounts = {}, channelResults = {}, isTesterAccount = false) {
   const score = result.friendlinessScore;
   const bar = buildScoreBar(score);
   const isMulti = channelNames.length > 1;
@@ -948,9 +952,9 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
     inline: false
   });
 
-  const planType = isPaidServer ? '⚡ Pro' : '🎁 Free Trial';
-  const reportWord = remaining === 1 ? 'report' : 'reports';
-  embed.setFooter({ text: `Vibe Check Bot • ${planType} • ${remaining} ${reportWord} remaining • Sensitivity: ${sensitivityLabel}` });
+  const planType = isTesterAccount ? '🧪 Tester' : isPaidServer ? '⚡ Pro' : '🎁 Free Trial';
+  const footerRemaining = isTesterAccount ? 'Unlimited' : `${remaining} ${remaining === 1 ? 'report' : 'reports'} remaining`;
+  embed.setFooter({ text: `Vibe Check Bot • ${planType} • ${footerRemaining} • Sensitivity: ${sensitivityLabel}` });
 
   return embed;
 }
@@ -1020,13 +1024,19 @@ async function logResearchData(data) {
 }
 
 // ============================================================
+// ============================================================
 // EMAIL REPORTS
 // ============================================================
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 async function sendEmailReport(serverName, serverId, channelNames, result, analyzedCount, timeframe, sensitivity, remaining) {
   try {
     const flaggedHtml = result.flaggedMessages && result.flaggedMessages.length > 0
-      ? result.flaggedMessages.sort((a, b) => b.severity - a.severity).map(f => `<li><strong>[${f.type} - ${f.severity}/10]</strong> ${f.message}</li>`).join('')
+      ? result.flaggedMessages.sort((a, b) => b.severity - a.severity).map(f => `<li><strong>[${escHtml(f.type)} - ${escHtml(String(f.severity))}/10]</strong> ${escHtml(f.message)}</li>`).join('')
       : '<li>No flagged messages</li>';
 
     await resend.emails.send({
@@ -1037,8 +1047,8 @@ async function sendEmailReport(serverName, serverId, channelNames, result, analy
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
   <h2 style="color:#F97316">📊 Vibe Check Bot Report</h2>
   <table style="width:100%;border-collapse:collapse">
-    <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Server</strong></td><td>${serverName}</td></tr>
-    <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Channel(s)</strong></td><td>${channelNames.join(', ')}</td></tr>
+    <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Server</strong></td><td>${escHtml(serverName)}</td></tr>
+    <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Channel(s)</strong></td><td>${escHtml(channelNames.join(', '))}</td></tr>
     <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Messages</strong></td><td>${analyzedCount}</td></tr>
     <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Score</strong></td><td><strong>${result.friendlinessScore}/10</strong></td></tr>
     <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Friendly</strong></td><td>${result.sentiment.friendly}</td></tr>
@@ -1050,7 +1060,7 @@ async function sendEmailReport(serverName, serverId, channelNames, result, analy
   <h3>⚠️ All Flagged Messages</h3>
   <ul>${flaggedHtml}</ul>
   <h3>💡 Recommendations</h3>
-  <p>${result.recommendation || 'N/A'}</p>
+  <p>${escHtml(result.recommendation || 'N/A')}</p>
 </div>`
     });
   } catch (err) { console.error('Email error:', err.message); }
@@ -1062,7 +1072,7 @@ async function sendNewTrialEmail(serverName, serverId, userName) {
       from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
       to: CONFIG.REPORT_EMAIL,
       subject: `🆕 New Free Trial: ${serverName}`,
-      html: `<div style="font-family:Arial,sans-serif"><h2>🆕 New Free Trial</h2><p><strong>Server:</strong> ${serverName}</p><p><strong>ID:</strong> ${serverId}</p><p><strong>By:</strong> ${userName}</p></div>`
+      html: `<div style="font-family:Arial,sans-serif"><h2>🆕 New Free Trial</h2><p><strong>Server:</strong> ${escHtml(serverName)}</p><p><strong>ID:</strong> ${escHtml(serverId)}</p><p><strong>By:</strong> ${escHtml(userName)}</p></div>`
     });
   } catch (err) { console.error('New trial email error:', err.message); }
 }
@@ -1073,7 +1083,7 @@ async function sendTrialEndedEmail(serverName, serverId, userName) {
       from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
       to: CONFIG.REPORT_EMAIL,
       subject: `🔔 Trial Ended: ${serverName}`,
-      html: `<div style="font-family:Arial,sans-serif"><h2>🔔 Trial Ended</h2><p><strong>Server:</strong> ${serverName}</p><p><strong>ID:</strong> ${serverId}</p><p><strong>By:</strong> ${userName}</p><p>To give extra reports: <code>/vibe-admin action:test server_id:${serverId}</code></p></div>`
+      html: `<div style="font-family:Arial,sans-serif"><h2>🔔 Trial Ended</h2><p><strong>Server:</strong> ${escHtml(serverName)}</p><p><strong>ID:</strong> ${escHtml(serverId)}</p><p><strong>By:</strong> ${escHtml(userName)}</p><p>To give extra reports: <code>/vibe-admin action:test server_id:${escHtml(serverId)}</code></p></div>`
     });
   } catch (err) { console.error('Trial ended email error:', err.message); }
 }
@@ -1220,6 +1230,9 @@ client.on('guildDelete', (guild) => {
 
 client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton() && interaction.customId === 'view_progress') {
+    if (!interaction.guildId) {
+      return interaction.reply({ content: '❌ Progress reports can only be viewed from inside a server.', ephemeral: true });
+    }
     await handleProgressCommand(interaction, '10', []);
     return;
   }
@@ -1264,8 +1277,6 @@ async function handleVibeCommand(interaction) {
     return interaction.reply({ content: `⏳ This server is running too many reports at once. Please wait a minute.`, ephemeral: true });
   }
 
-  incrementServerThrottle(serverId);
-
   const visibility = interaction.options.getString('visibility') || 'private';
   const sensitivity = interaction.options.getString('sensitivity') || 'medium';
   const timeframe = interaction.options.getString('timeframe') || '7d';
@@ -1287,13 +1298,31 @@ async function handleVibeCommand(interaction) {
   const seen = new Set();
   const channels = rawChannels.filter(c => { if (seen.has(c.id)) return false; seen.add(c.id); return true; });
 
-  // FIX #3: Message count is now a free integer — just clamp to plan limits
+  // Enforce channel limits per plan
+  const maxChannels = (serverIsPaid || tester) ? CONFIG.PRO_MAX_CHANNELS : CONFIG.FREE_MAX_CHANNELS;
+  if (channels.length > maxChannels) {
+    const upgradeNote = !serverIsPaid && !tester
+      ? `\n\nUpgrade to Pro to analyze up to **${CONFIG.PRO_MAX_CHANNELS} channels** at once.`
+      : '';
+    return interaction.reply({
+      embeds: [new EmbedBuilder().setColor(0xf59e0b)
+        .setTitle('⚠️ Too Many Channels')
+        .setDescription(`Your plan allows up to **${maxChannels} channel${maxChannels === 1 ? '' : 's'}** per report. You selected **${channels.length}**.${upgradeNote}`)
+      ],
+      components: (!serverIsPaid && !tester) ? [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK)
+      )] : [],
+      ephemeral: true
+    });
+  }
+
+  // Clamp message count to plan limits
   let messageCount = interaction.options.getInteger('messages') || 100;
   if (!serverIsPaid && !tester && messageCount > CONFIG.FREE_MAX_MESSAGES) {
     messageCount = CONFIG.FREE_MAX_MESSAGES;
   }
 
-  // Trial / limit check
+  // Trial / limit check — before throttling or deferring
   if (!tester && !canUse) {
     if (serverIsPaid) {
       const daysUntilReset = Math.max(1, 30 - Math.round((Date.now() - (status.monthStart || Date.now())) / (1000 * 60 * 60 * 24)));
@@ -1326,6 +1355,9 @@ async function handleVibeCommand(interaction) {
     }
   }
 
+  // Only count against throttle if we're actually going to run the analysis
+  incrementServerThrottle(serverId);
+
   // Private: defer ephemerally (DM delivery). Public: defer non-ephemerally so editReply is visible to all.
   await interaction.deferReply({ ephemeral: isPrivate });
   setCooldown(interaction.user.id);
@@ -1334,7 +1366,7 @@ async function handleVibeCommand(interaction) {
     const timeMs = { '1h': 3600000, '24h': 86400000, '7d': 604800000, '14d': 1209600000, '30d': 2592000000 }[timeframe] || 604800000;
     const timeframeLabel = { '1h': '1 hour', '24h': '24 hours', '7d': '7 days', '14d': '14 days', '30d': '30 days' }[timeframe] || '7 days';
 
-    const msgsPerChannel = Math.floor(messageCount / channels.length);
+    const msgsPerChannel = Math.max(10, Math.floor(messageCount / channels.length));
 
     const cachedMessages = {};
     const channelNames = [];
@@ -1426,7 +1458,7 @@ async function handleVibeCommand(interaction) {
     const reportEmbed = buildReportEmbed(
       result, totalAnalyzed, channelNames,
       timeframeLabel, sensitivity, remaining, serverIsPaid,
-      channelReactions, channelReactions[channelNames[0]], isPublic, channelMsgCounts, channelResults
+      channelReactions, channelReactions[channelNames[0]], isPublic, channelMsgCounts, channelResults, tester
     );
 
     const buttons = new ActionRowBuilder().addComponents(
@@ -1503,6 +1535,9 @@ async function handleVibeCommand(interaction) {
 
 async function handleProgressCommand(interaction, range, filterChannels) {
   const serverId = interaction.guildId;
+  if (!serverId || !interaction.guild) {
+    return interaction.reply({ content: '❌ This command can only be used inside a server.', ephemeral: true });
+  }
   await interaction.deferReply({ ephemeral: true });
 
   try {
@@ -1522,23 +1557,29 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     let filteredReports = sorted;
     let filterLabel = '';
 
-    if (filterChannels && filterChannels.length === 1) {
-      const chName = `#${filterChannels[0].name}`;
-      filteredReports = sorted.filter(r => r.channel_name && r.channel_name.includes(chName));
-      filterLabel = ` • ${chName}`;
+    if (filterChannels && filterChannels.length > 0) {
+      const chNames = filterChannels.map(c => `#${c.name}`);
+      // Match exactly: split CSV channel_name field and check for intersection
+      filteredReports = sorted.filter(r => {
+        if (!r.channel_name) return false;
+        const reportChs = r.channel_name.split(',').map(s => s.trim());
+        return chNames.some(ch => reportChs.includes(ch));
+      });
+      filterLabel = ` • ${chNames.join(', ')}`;
       if (filteredReports.length === 0) {
-        return interaction.editReply(`❌ No reports found for ${chName}. Run \`/vibe\` in that channel first.`);
+        const chList = chNames.join(', ');
+        return interaction.editReply(`❌ No reports found for ${chList}. Run \`/vibe\` in that channel first.`);
       }
     }
 
     const latest      = filteredReports[filteredReports.length - 1];
     const oldest      = filteredReports[0];
-    const latestScore = latest.score;
+    const latestScore = parseFloat(latest.score) || 0;
 
     // ── SHARED HELPERS ────────────────────────────────────────
     const safeDiv    = (n, d) => d === 0 ? 0 : Math.round((n / d) * 100);
-    const avgScore   = (filteredReports.reduce((s, r) => s + r.score, 0) / filteredReports.length).toFixed(1);
-    const scoreDiff  = parseFloat((latestScore - oldest.score).toFixed(1));
+    const avgScore   = (filteredReports.reduce((s, r) => s + (parseFloat(r.score) || 0), 0) / filteredReports.length).toFixed(1);
+    const scoreDiff  = parseFloat((latestScore - (parseFloat(oldest.score) || 0)).toFixed(1));
     const diffStr    = scoreDiff > 0 ? `+${scoreDiff}` : `${scoreDiff}`;
     const trendEmoji = scoreDiff > 0 ? '📈' : scoreDiff < 0 ? '📉' : '➡️';
 
@@ -1569,7 +1610,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     allChannels.forEach(ch => {
       const chReps = filteredReports.filter(r => r.channel_name === ch);
       if (chReps.length > 0) {
-        channelStats[ch] = { latestScore: chReps[chReps.length-1].score, reportCount: chReps.length };
+        channelStats[ch] = { latestScore: parseFloat(chReps[chReps.length-1].score) || 0, reportCount: chReps.length };
       }
     });
     const isMulti = Object.keys(channelStats).length > 1;
@@ -1611,7 +1652,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
       .setDescription(
         `**${filteredReports.length} report${filteredReports.length === 1 ? '' : 's'}**${filterLabel} • ` +
-        `First: **${oldest.score}/10** → Latest: **${latestScore}/10**\n\n` +
+        `First: **${parseFloat(oldest.score) || 0}/10** → Latest: **${latestScore}/10**\n\n` +
         `${scoreEmoji(latestScore)} **Current: ${latestScore}/10 — ${scoreLabel(latestScore)}**\n` +
         `\`${buildScoreBar(latestScore)}\`\n` +
         `Avg: **${avgScore}/10** • Change: **${trendEmoji} ${diffStr}**` +
@@ -1668,8 +1709,8 @@ async function handleProgressCommand(interaction, range, filterChannels) {
         .setColor(0x3b82f6)
         .setTitle('💬 Sentiment Evolution')
         .setDescription(
-          `**Friendly:** ${firstFPct}% → ${lastFPct}% ${fChange > 0 ? `🟢 ↑+${fChange}%` : fChange < 0 ? `🔴 ↓${fChange}%` : '→ unchanged'}\n` +
-          `**Unfriendly:** ${firstUPct}% → ${lastUPct}% ${uChange > 0 ? `🔴 ↑+${uChange}%` : uChange < 0 ? `🟢 ↓${uChange}%` : '→ unchanged'}`
+          `**Friendly:** ${firstFPct}% → ${lastFPct}% ${fChange > 0 ? `🟢 ↑+${fChange}%` : fChange < 0 ? `🔴 ↓${Math.abs(fChange)}%` : '→ unchanged'}\n` +
+          `**Unfriendly:** ${firstUPct}% → ${lastUPct}% ${uChange > 0 ? `🔴 ↑+${uChange}%` : uChange < 0 ? `🟢 ↓${Math.abs(uChange)}%` : '→ unchanged'}`
         )
         .setImage(sentimentUrl);
       embeds.push(embed2);
@@ -1776,10 +1817,15 @@ async function handleAdminCommand(interaction) {
     }
 
     if (action === 'pro') {
-      const expires = new Date();
+      const { data: existing } = await supabase.from('paid_servers').select('expires_at').eq('server_id', serverId).single();
+      const base = (existing?.expires_at && new Date(existing.expires_at) > new Date())
+        ? new Date(existing.expires_at)  // extend from current expiry
+        : new Date();                    // start from now
+      const expires = new Date(base);
       expires.setDate(expires.getDate() + 30);
       await supabase.from('paid_servers').upsert({ server_id: serverId, activated_at: new Date().toISOString(), expires_at: expires.toISOString() });
-      return interaction.editReply(`⚡ **Pro activated**\nServer: \`${serverId}\`\nExpires: **${expires.toDateString()}**`);
+      const wasActive = existing?.expires_at && new Date(existing.expires_at) > new Date();
+      return interaction.editReply(`⚡ **Pro ${wasActive ? 'extended' : 'activated'}**\nServer: \`${serverId}\`\nExpires: **${expires.toDateString()}**${wasActive ? ` _(+30 days from previous expiry)_` : ''}`);
     }
 
     if (action === 'pro_off') {
