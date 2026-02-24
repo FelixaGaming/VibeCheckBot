@@ -1538,6 +1538,33 @@ async function handleVibeCommand(interaction) {
     await sendEmailReport(serverName, serverId, channelNames, result, totAnalyzed, timeLabel, sensitivity, remaining);
 
     const usedNow = await getReportsUsed(serverId);
+
+    // Notify admin channel on every report
+    try {
+      const colors = [0x22c55e, 0x3b82f6, 0xf59e0b, 0x8b5cf6, 0xef4444];
+      const notifEmbed = new EmbedBuilder()
+        .setColor(colors[(usedNow - 1) % colors.length])
+        .setTitle(`📊 Report #${usedNow} — ${serverName}`)
+        .addFields(
+          { name: 'Server',    value: serverName,                                         inline: true },
+          { name: 'Score',     value: `**${result.friendlinessScore}/10** ${scoreEmoji(result.friendlinessScore)}`, inline: true },
+          { name: 'Reports',   value: `${usedNow} used`,                                  inline: true },
+          { name: 'Channels',  value: channelNames.join(', '),                            inline: true },
+          { name: 'Messages',  value: `${totAnalyzed}`,                                   inline: true },
+          { name: 'Run by',    value: interaction.user.tag,                               inline: true },
+          { name: 'Server ID', value: `\`${serverId}\``,                                  inline: false }
+        )
+        .setFooter({ text: `${isPaidServer ? '⚡ Pro' : '🎁 Free Trial'} • ${remaining} reports remaining` })
+        .setTimestamp();
+
+      const notifButtons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Extend Trial (+5)').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Give Tester').setStyle(ButtonStyle.Secondary)
+      );
+      await notifyAdminChannel(notifEmbed, notifButtons);
+    } catch (e) { console.error('Report notify error:', e.message); }
+
     if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
 
     if (usedNow % 5 === 0 && usedNow > 0) {
