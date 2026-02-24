@@ -850,4 +850,370 @@ async function handleVibeCommand(interaction) {
         embeds:[new EmbedBuilder().setColor(0xf59e0b).setTitle('Free Trial Ended').setDescription(`All **${CONFIG.FREE_REPORTS}** free reports used.`)
           .addFields({name:'Upgrade to Pro',value:`30 reports/month • Multi-channel`},{name:'Monthly',value:`[$8.99/mo](${CONFIG.STRIPE_MONTHLY_LINK})`,inline:true},{name:'Yearly',value:`[$99/yr](${CONFIG.STRIPE_YEARLY_LINK})`,inline:true})],
         components:[new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('Get Pro Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_
+          new ButtonBuilder().setLabel('Get Pro Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
+          ...(CONFIG.YEARLY_ENABLED?[new ButtonBuilder().setLabel('Get Pro Yearly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)]:[])
+        )],
+        ephemeral:true
+      });
+    }
+  }
+
+  await interaction.deferReply({ephemeral:isPrivate});
+  setCooldown(interaction.user.id);
+
+  try {
+    const timeMs = {'1h':3600000,'24h':86400000,'7d':604800000,'14d':1209600000,'30d':2592000000}[timeframe]||604800000;
+    const timeLabel = {'1h':'1 hour','24h':'24 hours','7d':'7 days','14d':'14 days','30d':'30 days'}[timeframe]||'7 days';
+    const mpc = Math.floor(msgCount / channels.length);
+
+    const cached = {}, channelNames = [], chMsgCounts = {};
+    for (const ch of channels) {
+      if (!canReadChannel(interaction.guild, ch)) return interaction.editReply(`No permission to read **#${ch.name}**.`);
+      const msgs = await fetchChannelMessages(ch, mpc, timeMs);
+      const n = `#${ch.name}`; cached[n] = msgs; chMsgCounts[n] = msgs.length; channelNames.push(n);
+    }
+
+    if (Object.values(cached).reduce((s,m) => s+m.length, 0) < 5) {
+      return interaction.editReply('Not enough messages. Need at least 5 in the selected timeframe. Try a longer timeframe.');
+    }
+
+    const channelResults = {};
+    let totTime=0, totCost=0, totIn=0, totOut=0, totAnalyzed=0;
+    for (const ch of channels) {
+      const n = `#${ch.name}`, msgs = cached[n]||[];
+      if (msgs.length < 2) { channelResults[n] = null; continue; }
+      const r = await analyzeMessages(msgs, [n], sensitivity, timeLabel);
+      channelResults[n] = r;
+      totTime += r.processingTime||0; totCost += r.cost||0; totIn += r.inputTokens||0; totOut += r.outputTokens||0; totAnalyzed += r.analyzedCount||0;
+    }
+
+    const valid = Object.entries(channelResults).filter(([,r]) => r !== null);
+    if (!valid.length) return interaction.editReply('Not enough messages in any channel. Try a longer timeframe.');
+
+    const tw     = valid.reduce((s,[,r]) => s + r.analyzedCount, 0) || 1;
+    const impact = parseFloat((valid.reduce((s,[,r]) => s + r.result.friendlinessScore * r.analyzedCount, 0) / tw).toFixed(1));
+
+    const cSent = {friendly:0,neutral:0,unfriendly:0}, cTox = {}, cFlagged = [];
+    let cStrengths = '', cRec = '', cSummary = '';
+    for (const [,r] of valid) {
+      cSent.friendly    += r.result.sentiment.friendly    || 0;
+      cSent.neutral     += r.result.sentiment.neutral     || 0;
+      cSent.unfriendly += r.result.sentiment.unfriendly || 0;
+      if (r.result.toxicityTypes) Object.entries(r.result.toxicityTypes).forEach(([k,v]) => { cTox[k] = (cTox[k]||0)+(v||0); });
+      if (r.result.flaggedMessages) cFlagged.push(...r.result.flaggedMessages);
+    }
+    const worst = [...valid].sort((a,b) => a[1].result.friendlinessScore - b[1].result.friendlinessScore)[0];
+    if (valid.length > 1) {
+      cStrengths = valid.filter(([,r]) => r.result.communityStrengths).map(([n,r]) => `${n}: ${r.result.communityStrengths}`).join(' ');
+      cRec       = `Focus growth energy on ${worst[0]} (${worst[1].result.friendlinessScore}/10). ${worst[1].result.recommendation||''}`;
+      cSummary   = `Impact score across ${valid.length} channels: ${impact}/10. ${worst[0]} has the most opportunity for growth.`;
+    } else {
+      cStrengths = valid[0][1].result.communityStrengths || '';
+      cRec       = valid[0][1].result.recommendation || '';
+      cSummary   = valid[0][1].result.summary || '';
+    }
+
+    const result = {
+      friendlinessScore: impact,
+      sentiment: cSent,
+      flaggedMessages: cFlagged.sort((a,b)=>b.severity-a.severity).slice(0,10),
+      toxicityTypes: cTox,
+      communityStrengths: cStrengths,
+      recommendation: cRec,
+      summary: cSummary
+    };
+
+    const reactions = await getChannelStats(interaction.guild, channels[0]);
+    await incrementUsage(serverId);
+    const remaining = await getReportsRemaining(serverId);
+
+    const embeds  = buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
+      new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
+    );
+    if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
+
+    await interaction.editReply({embeds, components:[buttons]});
+
+    await saveReport(serverId,serverName,channelNames,result.friendlinessScore,result.sentiment,result.flaggedMessages?.length||0,sensitivity,timeframe,totAnalyzed,result.toxicityTypes);
+    await logResearchData({serverName,serverId,memberCount:interaction.guild.memberCount,channelNames,channelResults,analyzedCount:totAnalyzed,score:result.friendlinessScore,sentiment:result.sentiment,flaggedCount:result.flaggedMessages?.length||0,toxicityTypes:result.toxicityTypes,sensitivity,timeframe,isPro:serverIsPaid,inputTokens:totIn,outputTokens:totOut,cost:totCost,processingTime:totTime});
+    await sendEmailReport(serverName,serverId,channelNames,result,totAnalyzed,timeLabel,sensitivity,remaining);
+
+    const usedNow = await getReportsUsed(serverId);
+    if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
+
+    if (usedNow % 5 === 0 && usedNow > 0) {
+      await interaction.followUp({
+        embeds:[new EmbedBuilder().setColor(0xA78BFA).setDescription(`🎉 **${usedNow} reports** done! Track your community's growth.`)],
+        components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress'))],
+        ephemeral:true
+      });
+    }
+
+    if (!serverIsPaid && !tester && remaining > 0 && remaining <= 2) {
+      await interaction.followUp({embeds:[new EmbedBuilder().setColor(0xf59e0b).setDescription(`Only **${remaining}** free ${remaining===1?'report':'reports'} left. [Get Pro](${CONFIG.STRIPE_MONTHLY_LINK}).`)],ephemeral:true});
+    }
+
+    if (serverIsPaid) {
+      const sub = await getSubscriptionStatus(serverId);
+      if (sub.isActive && sub.daysLeft <= 7) {
+        await interaction.followUp({
+          embeds:[new EmbedBuilder().setColor(0xf59e0b).setTitle('Subscription Expiring Soon').setDescription(`Pro expires in **${sub.daysLeft} day${sub.daysLeft===1?'':'s'}**.`)],
+          components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Renew Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK))],
+          ephemeral:true
+        });
+      }
+    }
+
+  } catch (err) {
+    console.error('Vibe error:', err);
+    try { await interaction.editReply('Something went wrong. Please try again.'); } catch {}
+  }
+}
+
+// ============================================================
+// /vibe-progress HANDLER
+// Layout: 1) Descriptive analysis + score chart
+//          2) Toxicity breakdown + toxicity chart
+//          3) Impact score over time + impact chart
+//          4) Sentiment evolution + stacked chart
+//          5) Flagged trend + flagged chart
+//          6) Behavior probability + predictions + recommendations
+// ============================================================
+
+async function handleProgressCommand(interaction, range, filterChannels) {
+  const serverId = interaction.guildId;
+  await interaction.deferReply({ephemeral:true});
+
+  try {
+    let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', {ascending:false});
+    if (range === '30d') q = q.gte('created_at', new Date(Date.now()-30*86400000).toISOString());
+    else q = q.limit(parseInt(range)||10);
+
+    const {data:reports, error} = await q;
+    if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
+
+    const sorted = [...reports].reverse();
+    let filtered = sorted, filterLabel = '';
+    if (filterChannels?.length === 1) {
+      const n = `#${filterChannels[0].name}`;
+      filtered = sorted.filter(r => r.channel_name?.includes(n));
+      filterLabel = ` • ${n}`;
+      if (!filtered.length) return interaction.editReply(`No reports for ${n}. Run /vibe there first.`);
+    }
+
+    const latest    = filtered[filtered.length-1];
+    const oldest    = filtered[0];
+    const avg       = (filtered.reduce((s,r) => s+r.score, 0) / filtered.length).toFixed(1);
+    const diff      = parseFloat((latest.score - oldest.score).toFixed(1));
+    const arrow      = diff > 0 ? `📈 +${diff}` : diff < 0 ? `📉 ${diff}` : '➡️ Stable';
+
+    const sd = (n,d) => d===0?0:Math.round(n/d*100);
+    const ot = (oldest.friendly||0)+(oldest.neutral||0)+(oldest.unfriendly||0)||1;
+    const nt = (latest.friendly||0)+(latest.neutral||0)+(latest.unfriendly||0)||1;
+    const fFirst=sd(oldest.friendly||0,ot), fLast=sd(latest.friendly||0,nt);
+    const uFirst=sd(oldest.unfriendly||0,ot), uLast=sd(latest.unfriendly||0,nt);
+    const fDelta=fLast-fFirst, uDelta=uLast-uFirst;
+
+    const toxMap = {};
+    filtered.forEach(r => {
+      try { const t=typeof r.toxicity_types==='string'?JSON.parse(r.toxicity_types):r.toxicity_types; if(t)Object.entries(t).forEach(([k,v])=>{toxMap[k]=(toxMap[k]||0)+(v||0);}); } catch {}
+    });
+    const toxEntries = Object.entries(toxMap).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+
+    const fFlag = oldest.flagged_count||0, lFlag = latest.flagged_count||0;
+
+    // Behavior probability
+    const prob = calcBehaviorProbability(filtered);
+
+    // ── EMBED 1: Descriptive Analysis + Score Chart ──
+    const trendText = (() => {
+      if (filtered.length < 2) return 'Only one report so far — run `/vibe` again to start tracking trends.';
+      if (diff >= 2)    return `🚀 **Major improvement!** Score up **+${diff} pts**. Your community is flourishing.`;
+      if (diff >= 0.5)  return `📈 **Trending upward** (+${diff} pts). Positive momentum — your community is growing stronger.`;
+      if (diff === 0)   return `➡️ **Stable** at ${latest.score}/10. Community health is consistent.`;
+      if (diff >= -0.5) return `⚠️ **Slight dip** (${diff} pts). A great time to amplify what's working well.`;
+      if (diff >= -2)   return `📉 **Declining** (${diff} pts). Focus on celebrating positive interactions to shift energy.`;
+      return `🚨 **Significant drop** (${diff} pts). Now is the time to spotlight positive members and reinvigorate the community.`;
+    })();
+
+    const healthLines = [];
+    if (latest.score >= 8)      healthLines.push(`✨ **Thriving** — Your community is in excellent health at ${latest.score}/10.`);
+    else if (latest.score >= 6) healthLines.push(`👍 **Healthy** — Generally positive at ${latest.score}/10.`);
+    else if (latest.score >= 4) healthLines.push(`⚠️ **Mixed** — Score of ${latest.score}/10 shows room to grow.`);
+    else                          healthLines.push(`🚨 **Needs attention** — Score of ${latest.score}/10. Time to invest in community building.`);
+
+    if (fLast >= 70)      healthLines.push(`🟢 **${fLast}% friendly** — your community is warm and welcoming.`);
+    else if (fLast >= 50) healthLines.push(`🟡 **${fLast}% friendly** — mostly positive with room to grow.`);
+    else                   healthLines.push(`🔴 **Only ${fLast}% friendly** — there is a great opportunity to build more connection and belonging.`);
+
+    if (diff > 0)  healthLines.push(`📈 Score improved **+${diff} pts** since first report — your community is on an upward journey.`);
+    else if (diff < 0) healthLines.push(`📉 Score down **${diff} pts** — this is an invitation to reinvest in what makes your community special.`);
+    if (toxEntries.length > 0) healthLines.push(`⚠️ Most common issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} instances) — see toxicity section below.`);
+
+    const e1 = new EmbedBuilder()
+      .setColor(latest.score>=7?0x22c55e:latest.score>=4?0xf59e0b:0xef4444)
+      .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
+      .setDescription(`**${filtered.length} report${filtered.length===1?'':'s'}**${filterLabel}  •  Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** •  ${arrow}\nAverage: **${avg}/10**`)
+      .addFields(
+        {name: '🎯 Trend Analysis',    value: trendText,               inline: false},
+        {name: '🔍 Community Health',  value: healthLines.join('\n'), inline: false}
+      )
+      .setImage(scoreLineChart(filtered))
+      .setFooter({text: `Vibe Check Bot  •  ${filtered.length} reports  •  Run /vibe regularly to improve predictions`});
+
+    // ── EMBED 2: Toxicity + chart ──
+    const toxText = toxEntries.length > 0
+      ? toxEntries.slice(0,6).map(([k,v]) => { const f=Math.round(v/(toxEntries[0][1]||1)*10); return `\`${'█'.repeat(f)}${'░'.repeat(10-f)}\` **${k}**: ${v}`; }).join('\n')
+      : '✅ No toxicity detected across all reports';
+
+    const e2 = new EmbedBuilder().setColor(0xf97316).setTitle('🧪 Cumulative Toxicity Breakdown')
+      .addFields({name: 'All Reports Combined', value: toxText, inline: false});
+    const toxUrl2 = cumulativeToxChart(filtered);
+    if (toxUrl2) e2.setImage(toxUrl2);
+
+    // ── EMBED 3: Impact Score over time ──
+    const allChs = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
+    const isMulti = allChs.length > 1;
+    const e3 = new EmbedBuilder().setColor(0x8b5cf6).setTitle(isMulti ? '⚡ Impact Score Over Time' : '📊 Friendliness Score Over Time');
+    if (isMulti) {
+      e3.setDescription('The Impact Score reflects the weighted average across all channels, showing overall community health.');
+      const perChLines = allChs.map(n => {
+        const cr = sorted.filter(r => r.channel_name===n); if (!cr.length) return null;
+        const cl=cr[cr.length-1].score, co=cr[0].score, cd=(cl-co).toFixed(1);
+        return `${cl>=7?'🟢':cl>=4?'🟡':'🔴'} **${n}** \`${scoreBar(cl)}\`  **${cl}/10** ${cd>0?`📈 +${cd}`:cd<0?`📉 ${cd}`:'➡️'}`;
+      }).filter(Boolean);
+      if (perChLines.length) e3.addFields({name: 'Per-Channel Latest Scores', value: perChLines.join('\n'), inline: false});
+      e3.setImage(impactLineChart(filtered));
+    } else {
+      e3.setImage(scoreLineChart(filtered));
+    }
+
+    // ── EMBED 4: Sentiment evolution + stacked chart ──
+    const e4 = new EmbedBuilder().setColor(0x22c55e).setTitle('💬 Sentiment Evolution')
+      .addFields({
+        name: 'Change Over Time',
+        value:
+          `🟢 Friendly:   **${fFirst}%** → **${fLast}%** (${fDelta>=0?'+':''}${fDelta}%)\n` +
+          `🔴 Unfriendly: **${uFirst}%** → **${uLast}%** (${uDelta>=0?'+':''}${uDelta}%)`,
+        inline: false
+      })
+      .setImage(sentimentStackedChart(filtered));
+
+    // ── EMBED 5: Flagged messages trend + chart ──
+    const e5 = new EmbedBuilder().setColor(0xef4444).setTitle('🚩 Flagged Messages Trend')
+      .addFields({
+        name: 'Summary',
+        value: `First report: **${fFlag}** flagged | Latest: **${lFlag}** flagged\n${lFlag<fFlag?`✅ Down ${fFlag-lFlag} — great progress`:lFlag>fFlag?`⚠️ Up ${lFlag-fFlag} — opportunity to reinforce positive norms`:'➡️ Stable'}`,
+        inline: false
+      })
+      .setImage(flaggedLineChart(filtered));
+
+    // ── EMBED 6: Behavior Probability + Predictions + Recommendations ──
+    const predLines = [];
+    if (filtered.length >= 3) {
+      const ra = filtered.slice(-3).reduce((s,r)=>s+r.score,0)/3;
+      const oa = filtered.slice(0,-3).reduce((s,r)=>s+r.score,0)/Math.max(filtered.length-3,1);
+      const m  = ra-oa;
+      if (m >= 1)        predLines.push(`📈 **Accelerating upward** — community energy is building. Expect continued improvement.`);
+      else if (m >= 0)  predLines.push(`🟢 **Positive momentum** — health is stable and likely to improve.`);
+      else if (m >= -1) predLines.push(`🟡 **Slight downward drift** — a good moment to reinvigorate engagement with a community event or spotlight.`);
+      else               predLines.push(`🔴 **Declining momentum** — investing in member recognition and shared goals now can shift this trend.`);
+    }
+    if (uDelta > 5)        predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — consider highlighting your most positive members to reset the tone.`);
+    else if (uDelta < -5)  predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — your community norms are strengthening.`);
+    if (lFlag > fFlag*1.5 && lFlag > 2) predLines.push(`🚨 **Flagged messages spiking** — this is a signal to double down on celebrating what makes your community great.`);
+    else if (lFlag === 0)  predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
+
+    // Positive psychology recommendations
+    const recLines = [];
+    if (diff < -0.5)      recLines.push(`💡 Score dipped — create a "community highlight" post celebrating your most positive recent conversations.`);
+    else if (diff > 0.5)  recLines.push(`🌟 Score is rising — keep the momentum by publicly recognizing the members who contribute most positively.`);
+    else                   recLines.push(`🎯 Stable community — try a "spotlight of the week" feature to proactively reinforce the positive tone.`);
+
+    if (fLast >= 70)       recLines.push(`🏆 **${fLast}% friendly** — your community has a strong foundation. Channel this energy into a shared goal or community challenge.`);
+    else if (fLast >= 50)  recLines.push(`🌱 Build on the **${fLast}% friendly** baseline by creating more opportunities for members to connect over shared interests.`);
+    else                   recLines.push(`❤️ Focus on building **belonging** — small acts like welcoming new members publicly can shift community culture over time.`);
+
+    if (toxEntries.length > 0) {
+      const typeRec = {
+        harassment: 'Shift attention by spotlighting respectful conversations — what gets celebrated gets repeated.',
+        insults:    'Create a "kindness challenge" — invite members to share something they appreciate about the community.',
+        hate_speech:'Build a stronger shared identity — when members feel proud of who they are together, exclusionary behavior naturally decreases.',
+        spam:       'Low engagement often drives spam — try a community Q&A or AMA to spark genuine conversation.',
+        threats:    'Build psychological safety by celebrating vulnerability and openness in conversations.',
+        bullying:   'Empower bystanders — recognize members who stand up for others and create a culture of mutual support.',
+        profanity:  'If this does not fit your community, model the tone you want to see rather than focusing on what you want to stop.'
+      };
+      recLines.push(`🔮 **For ${toxEntries[0][0]}:** ${typeRec[toxEntries[0][0]] || 'Focus on amplifying positive interactions to naturally crowd out negative ones.'}`);
+    }
+
+    const e6 = new EmbedBuilder().setColor(0x6366f1).setTitle('🔮 Behavior Forecast & Recommendations');
+
+    if (prob) {
+      const probText =
+        `${prob.improveTrend} **${prob.improveChance}%** probability community improves\n` +
+        `${prob.worsenTrend} **${prob.worsenChance}%** probability toxicity increases\n\n` +
+        `${prob.confidenceEmoji} **Confidence: ${prob.confidence}** (based on ${filtered.length} reports)\n\n` +
+        `**Why:**\n${prob.factors.map(f=>`• ${f}`).join('\n')}`;
+      e6.addFields({name: '📊 Probability Forecast', value: probText, inline: false});
+    } else {
+      e6.addFields({name: '📊 Probability Forecast', value: 'Run at least 2 reports to see behavior probability forecasts.', inline: false});
+    }
+
+    if (predLines.length) e6.addFields({name: '🔭 Predictions', value: predLines.join('\n'), inline: false});
+    e6.addFields({name: '💡 Positive Psychology Recommendations', value: recLines.join('\n'), inline: false});
+
+    await interaction.editReply({embeds: [e1, e2, e3, e4, e5, e6]});
+
+  } catch (err) {
+    console.error('Progress error:', err);
+    try { await interaction.editReply('Something went wrong loading your progress report.'); } catch {}
+  }
+}
+
+// ============================================================
+// /vibe-admin HANDLER
+// ============================================================
+
+async function handleAdminCommand(interaction) {
+  if (interaction.user.id !== CONFIG.OWNER_ID) return interaction.reply({content:'Owner only.',ephemeral:true});
+  const action=interaction.options.getString('action'), sid=interaction.options.getString('server_id'), extra=interaction.options.getInteger('reports')||5;
+  if (!/^\d{17,19}$/.test(sid)) return interaction.reply({content:'Invalid server ID.',ephemeral:true});
+  await interaction.deferReply({ephemeral:true});
+  console.log(`ADMIN: ${action} on ${sid} by ${interaction.user.tag}`);
+  try {
+    if (action === 'tester') {
+      const exp = new Date(Date.now()+14*86400000);
+      await supabase.from('testers').upsert({server_id:sid, approved_at:new Date().toISOString(), expires_at:exp.toISOString()});
+      return interaction.editReply(`Tester approved — \`${sid}\`\nExpires: **${exp.toDateString()}**\nUnlimited access unlocked.`);
+    }
+    if (action === 'tester_off') {
+      await supabase.from('testers').delete().eq('server_id',sid);
+      return interaction.editReply(`Tester revoked — \`${sid}\` back to Free tier.`);
+    }
+    if (action === 'test') {
+      const {data} = await supabase.from('usage').select('free_bonus').eq('server_id',sid).single();
+      if (data) await supabase.from('usage').update({free_bonus:(data.free_bonus||0)+extra}).eq('server_id',sid);
+      else await supabase.from('usage').insert({server_id:sid,reports_used:0,free_bonus:extra,month_start:new Date().toISOString()});
+      return interaction.editReply(`Added ${extra} extra reports to \`${sid}\`.`);
+    }
+    if (action === 'pro') {
+      const exp=new Date(); exp.setDate(exp.getDate()+30);
+      await supabase.from('paid_servers').upsert({server_id:sid,activated_at:new Date().toISOString(),expires_at:exp.toISOString()});
+      return interaction.editReply(`Pro activated — \`${sid}\` expires **${exp.toDateString()}**.`);
+    }
+    if (action === 'pro_off') {
+      await supabase.from('paid_servers').delete().eq('server_id',sid);
+      return interaction.editReply(`Pro deactivated — \`${sid}\` back to Free tier.`);
+    }
+  } catch (e) { console.error('Admin error:',e); return interaction.editReply(`Error: ${e.message}`); }
+}
+
+// ============================================================
+// HTTP + START
+// ============================================================
+
+http.createServer((req, res) => res.end('Vibe Check Bot is running')).listen(process.env.PORT || 3000);
+client.login(process.env.DISCORD_TOKEN);
