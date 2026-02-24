@@ -1332,7 +1332,7 @@ client.on('interactionCreate', async interaction => {
     // ── Admin action buttons ──
     if (interaction.isButton() && interaction.user.id === CONFIG.OWNER_ID) {
       const id = interaction.customId;
-      if (id.startsWith('admin_tester_') || id.startsWith('admin_pro_') || id.startsWith('admin_bonus_') || id.startsWith('admin_prooff_')) {
+      if (id.startsWith('admin_tester_') || id.startsWith('admin_pro_') || id.startsWith('admin_bonus_') || id.startsWith('admin_prooff_') || id.startsWith('admin_endtrial_')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const parts = id.split('_');
         const action = parts.slice(0, parts.length - 1).join('_').replace('admin_', '');
@@ -1354,6 +1354,15 @@ client.on('interactionCreate', async interaction => {
           } else if (action === 'prooff') {
             await supabase.from('paid_servers').delete().eq('server_id', sid);
             await interaction.editReply(`✅ Pro deactivated for \`${sid}\``);
+          } else if (action === 'endtrial') {
+            // Set reports_used to FREE_REPORTS so they hit the paywall immediately
+            const { data } = await supabase.from('usage').select('*').eq('server_id', sid).single().catch(()=>({data:null}));
+            if (data) await supabase.from('usage').update({ reports_used: CONFIG.FREE_REPORTS, free_bonus: 0 }).eq('server_id', sid);
+            else await supabase.from('usage').insert({ server_id: sid, reports_used: CONFIG.FREE_REPORTS, free_bonus: 0, month_start: new Date().toISOString() });
+            // Also remove tester/pro just in case
+            await supabase.from('testers').delete().eq('server_id', sid).catch(()=>{});
+            await supabase.from('paid_servers').delete().eq('server_id', sid).catch(()=>{});
+            await interaction.editReply(`⛔ Trial ended for \`${sid}\` — they will hit the paywall on next /vibe.`);
           }
           // Update the original alert message to show action taken
           try {
@@ -1558,9 +1567,10 @@ async function handleVibeCommand(interaction) {
         .setTimestamp();
 
       const notifButtons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Extend Trial (+5)').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Give Tester').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Extend (+5)').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Tester').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`admin_endtrial_${serverId}`).setLabel('⛔ End Trial').setStyle(ButtonStyle.Danger)
       );
       await notifyAdminChannel(notifEmbed, notifButtons);
     } catch (e) { console.error('Report notify error:', e.message); }
@@ -1865,6 +1875,31 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     embeds.push(eChart4, eChart5, e3, e4, e5);
 
     await interaction.editReply({ embeds });
+
+    // Notify admin channel about progress report run
+    try {
+      const serverName = interaction.guild.name;
+      const serverId = interaction.guildId;
+      const progressEmbed = new EmbedBuilder()
+        .setColor(0x6366f1)
+        .setTitle(`📈 Progress Report Viewed — ${serverName}`)
+        .addFields(
+          { name: 'Server',   value: serverName,                    inline: true },
+          { name: 'Run by',   value: interaction.user.tag,          inline: true },
+          { name: 'Reports',  value: `${filtered.length} analyzed`, inline: true },
+          { name: 'Range',    value: range === '30d' ? 'Last 30 days' : `Last ${range} reports`, inline: true },
+          { name: 'Server ID', value: `\`${serverId}\``,            inline: false }
+        )
+        .setTimestamp()
+        .setFooter({ text: 'Active user — checking community trends' });
+      const progressButtons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Extend (+5)').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Tester').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`admin_endtrial_${serverId}`).setLabel('⛔ End Trial').setStyle(ButtonStyle.Danger)
+      );
+      await notifyAdminChannel(progressEmbed, progressButtons);
+    } catch (e) { console.error('Progress notify error:', e.message); }
 
   } catch (err) {
     console.error('Progress error:', err);
