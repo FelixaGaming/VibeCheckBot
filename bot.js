@@ -1495,7 +1495,7 @@ async function handleVibeCommand(interaction) {
 
     const cSent = {friendly:0,neutral:0,unfriendly:0}, cTox = {}, cFlagged = [];
     let cStrengths = '', cRec = '', cSummary = '';
-    for (const [,r] of valid) {
+    for (const [ch, r] of valid) {
       cSent.friendly   += r.result.sentiment.friendly   || 0;
       cSent.neutral    += r.result.sentiment.neutral    || 0;
       cSent.unfriendly += r.result.sentiment.unfriendly || 0;
