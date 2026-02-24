@@ -268,21 +268,26 @@ function toxBarChart(toxTypes, title) {
   });
 }
 
-function scoreLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+function multiChannelLineChart(allChannelData, labels) {
+  const colors = ['#f97316', '#8b5cf6', '#22c55e', '#ef4444', '#3b82f6'];
+  const datasets = Object.entries(allChannelData).map(([channelName, scores], index) => ({
+    label: channelName,
+    data: scores,
+    borderColor: colors[index % colors.length],
+    backgroundColor: 'transparent',
+    fill: false,
+    tension: 0.35,
+    pointRadius: 4
+  }));
+
   return chartUrl({
     type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Friendliness Score',
-        data: reports.map(r => r.score),
-        borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.15)',
-        fill: true, tension: 0.35, pointRadius: 5, pointBackgroundColor: '#f97316'
-      }]
-    },
+    data: { labels, datasets },
     options: {
-      plugins: { title: { display: true, text: 'Friendliness Score Over Time', font: { size: 14 } } },
+      plugins: { 
+        title: { display: true, text: 'Friendliness Trends by Channel', font: { size: 14 } },
+        legend: { display: true, position: 'bottom' } 
+      },
       scales: { yAxes: [{ ticks: { min: 0, max: 10, stepSize: 1 } }] }
     }
   });
@@ -994,7 +999,21 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     const {data:reports, error} = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
 
+    // Grouping historical scores by channel for multi-line graphing
     const sorted = [...reports].reverse();
+    const labels = sorted.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+
+    const channelData = {};
+    sorted.forEach((r, index) => {
+        const names = r.channel_name ? r.channel_name.split(', ') : ['General'];
+        names.forEach(name => {
+            if (!channelData[name]) channelData[name] = new Array(sorted.length).fill(null);
+            channelData[name][index] = r.score;
+        });
+    });
+
+    const multiLineChartUrl = multiChannelLineChart(channelData, labels);
+
     let filtered = sorted, filterLabel = '';
     if (filterChannels?.length === 1) {
       const n = `#${filterChannels[0].name}`;
@@ -1027,7 +1046,7 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     // Behavior probability
     const prob = calcBehaviorProbability(filtered);
 
-    // ── EMBED 1: Descriptive Analysis + Score Chart ──
+    // ── EMBED 1: Descriptive Analysis + Multi-Channel Chart ──
     const trendText = (() => {
       if (filtered.length < 2) return 'Only one report so far — run `/vibe` again to start tracking trends.';
       if (diff >= 2)    return `🚀 **Major improvement!** Score up **+${diff} pts**. Your community is flourishing.`;
@@ -1044,24 +1063,16 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     else if (latest.score >= 4) healthLines.push(`⚠️ **Mixed** — Score of ${latest.score}/10 shows room to grow.`);
     else                          healthLines.push(`🚨 **Needs attention** — Score of ${latest.score}/10. Time to invest in community building.`);
 
-    if (fLast >= 70)      healthLines.push(`🟢 **${fLast}% friendly** — your community is warm and welcoming.`);
-    else if (fLast >= 50) healthLines.push(`🟡 **${fLast}% friendly** — mostly positive with room to grow.`);
-    else                   healthLines.push(`🔴 **Only ${fLast}% friendly** — there is a great opportunity to build more connection and belonging.`);
-
-    if (diff > 0)  healthLines.push(`📈 Score improved **+${diff} pts** since first report — your community is on an upward journey.`);
-    else if (diff < 0) healthLines.push(`📉 Score down **${diff} pts** — this is an invitation to reinvest in what makes your community special.`);
-    if (toxEntries.length > 0) healthLines.push(`⚠️ Most common issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} instances) — see toxicity section below.`);
-
     const e1 = new EmbedBuilder()
       .setColor(latest.score>=7?0x22c55e:latest.score>=4?0xf59e0b:0xef4444)
       .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
-      .setDescription(`**${filtered.length} report${filtered.length===1?'':'s'}**${filterLabel}  •  Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** •  ${arrow}\nAverage: **${avg}/10**`)
+      .setDescription(`**${filtered.length} report${filtered.length===1?'':'s'}**${filterLabel} • Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** • ${arrow}\nAverage: **${avg}/10**`)
       .addFields(
         {name: '🎯 Trend Analysis',    value: trendText,               inline: false},
         {name: '🔍 Community Health',  value: healthLines.join('\n'), inline: false}
       )
-      .setImage(scoreLineChart(filtered))
-      .setFooter({text: `Vibe Check Bot  •  ${filtered.length} reports  •  Run /vibe regularly to improve predictions`});
+      .setImage(multiLineChartUrl)
+      .setFooter({text: `Vibe Check Bot • ${filtered.length} reports • Run /vibe regularly to improve predictions`});
 
     // ── EMBED 2: Toxicity + chart ──
     const toxText = toxEntries.length > 0
@@ -1079,15 +1090,9 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     const e3 = new EmbedBuilder().setColor(0x8b5cf6).setTitle(isMulti ? '⚡ Impact Score Over Time' : '📊 Friendliness Score Over Time');
     if (isMulti) {
       e3.setDescription('The Impact Score reflects the weighted average across all channels, showing overall community health.');
-      const perChLines = allChs.map(n => {
-        const cr = sorted.filter(r => r.channel_name===n); if (!cr.length) return null;
-        const cl=cr[cr.length-1].score, co=cr[0].score, cd=(cl-co).toFixed(1);
-        return `${cl>=7?'🟢':cl>=4?'🟡':'🔴'} **${n}** \`${scoreBar(cl)}\`  **${cl}/10** ${cd>0?`📈 +${cd}`:cd<0?`📉 ${cd}`:'➡️'}`;
-      }).filter(Boolean);
-      if (perChLines.length) e3.addFields({name: 'Per-Channel Latest Scores', value: perChLines.join('\n'), inline: false});
       e3.setImage(impactLineChart(filtered));
     } else {
-      e3.setImage(scoreLineChart(filtered));
+      e3.setImage(multiLineChartUrl);
     }
 
     // ── EMBED 4: Sentiment evolution + stacked chart ──
@@ -1121,33 +1126,12 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       else if (m >= -1) predLines.push(`🟡 **Slight downward drift** — a good moment to reinvigorate engagement with a community event or spotlight.`);
       else               predLines.push(`🔴 **Declining momentum** — investing in member recognition and shared goals now can shift this trend.`);
     }
-    if (uDelta > 5)        predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — consider highlighting your most positive members to reset the tone.`);
-    else if (uDelta < -5)  predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — your community norms are strengthening.`);
-    if (lFlag > fFlag*1.5 && lFlag > 2) predLines.push(`🚨 **Flagged messages spiking** — this is a signal to double down on celebrating what makes your community great.`);
-    else if (lFlag === 0)  predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
 
     // Positive psychology recommendations
     const recLines = [];
     if (diff < -0.5)      recLines.push(`💡 Score dipped — create a "community highlight" post celebrating your most positive recent conversations.`);
     else if (diff > 0.5)  recLines.push(`🌟 Score is rising — keep the momentum by publicly recognizing the members who contribute most positively.`);
     else                   recLines.push(`🎯 Stable community — try a "spotlight of the week" feature to proactively reinforce the positive tone.`);
-
-    if (fLast >= 70)       recLines.push(`🏆 **${fLast}% friendly** — your community has a strong foundation. Channel this energy into a shared goal or community challenge.`);
-    else if (fLast >= 50)  recLines.push(`🌱 Build on the **${fLast}% friendly** baseline by creating more opportunities for members to connect over shared interests.`);
-    else                   recLines.push(`❤️ Focus on building **belonging** — small acts like welcoming new members publicly can shift community culture over time.`);
-
-    if (toxEntries.length > 0) {
-      const typeRec = {
-        harassment: 'Shift attention by spotlighting respectful conversations — what gets celebrated gets repeated.',
-        insults:    'Create a "kindness challenge" — invite members to share something they appreciate about the community.',
-        hate_speech:'Build a stronger shared identity — when members feel proud of who they are together, exclusionary behavior naturally decreases.',
-        spam:       'Low engagement often drives spam — try a community Q&A or AMA to spark genuine conversation.',
-        threats:    'Build psychological safety by celebrating vulnerability and openness in conversations.',
-        bullying:   'Empower bystanders — recognize members who stand up for others and create a culture of mutual support.',
-        profanity:  'If this does not fit your community, model the tone you want to see rather than focusing on what you want to stop.'
-      };
-      recLines.push(`🔮 **For ${toxEntries[0][0]}:** ${typeRec[toxEntries[0][0]] || 'Focus on amplifying positive interactions to naturally crowd out negative ones.'}`);
-    }
 
     const e6 = new EmbedBuilder().setColor(0x6366f1).setTitle('🔮 Behavior Forecast & Recommendations');
 
@@ -1158,8 +1142,6 @@ async function handleProgressCommand(interaction, range, filterChannels) {
         `${prob.confidenceEmoji} **Confidence: ${prob.confidence}** (based on ${filtered.length} reports)\n\n` +
         `**Why:**\n${prob.factors.map(f=>`• ${f}`).join('\n')}`;
       e6.addFields({name: '📊 Probability Forecast', value: probText, inline: false});
-    } else {
-      e6.addFields({name: '📊 Probability Forecast', value: 'Run at least 2 reports to see behavior probability forecasts.', inline: false});
     }
 
     if (predLines.length) e6.addFields({name: '🔭 Predictions', value: predLines.join('\n'), inline: false});
