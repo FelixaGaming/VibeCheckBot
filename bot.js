@@ -43,7 +43,7 @@ const CONFIG = {
   STRIPE_MONTHLY_LINK: 'https://buy.stripe.com/fZu28k00n5s92Oqf4z4ow01',
   STRIPE_YEARLY_LINK:  'https://buy.stripe.com/bJebIUbJ56wd4Wye0v4ow03',
   CONTACT_EMAIL: 'play@felixagaming.com',
-  REPORT_EMAIL:  'play@felixagaming.com',
+  REPORT_EMAIL:  'go@vibecheckbot.com',
   OWNER_ID:      '1185219817913991220',
   YEARLY_ENABLED: true,
   COOLDOWN_SECONDS: 15,
@@ -662,24 +662,170 @@ async function logResearchData(data) {
 
 async function sendEmailReport(serverName, serverId, channelNames, result, analyzedCount, timeframe, sensitivity, remaining) {
   try {
-    const fHtml = result.flaggedMessages?.length > 0
-      ? result.flaggedMessages.sort((a,b)=>b.severity-a.severity).map(f=>`<li><strong>[${f.type} - ${f.severity}/10]</strong> ${f.message}</li>`).join('')
-      : '<li>No flagged messages</li>';
-    await resend.emails.send({
-      from: 'Vibe Check Bot <noreply@vibecheckbot.com>', to: CONFIG.REPORT_EMAIL,
-      subject: `Vibe Report — ${serverName} | Score: ${result.friendlinessScore}/10`,
-      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-        <h2 style="color:#F97316">Vibe Check Bot Report</h2>
-        <p><strong>Server:</strong> ${serverName} (${serverId})</p>
-        <p><strong>Channels:</strong> ${channelNames.join(', ')}</p>
-        <p><strong>Score:</strong> ${result.friendlinessScore}/10 | <strong>Messages:</strong> ${analyzedCount}</p>
-        <p>Friendly: ${result.sentiment.friendly} | Neutral: ${result.sentiment.neutral} | Unfriendly: ${result.sentiment.unfriendly}</p>
-        <p>Flagged: ${result.flaggedMessages?.length||0} | Remaining: ${remaining}</p>
-        <h3>Community Strengths</h3><p>${result.communityStrengths||'N/A'}</p>
-        <h3>Recommendations</h3><p>${result.recommendation||'N/A'}</p>
-        <h3>All Flagged Messages</h3><ul>${fHtml}</ul>
-      </div>`
+    const score      = result.friendlinessScore;
+    const scoreColor = score >= 7 ? '#22c55e' : score >= 4 ? '#f59e0b' : '#ef4444';
+    const scoreLabel = score >= 8 ? 'Excellent' : score >= 6 ? 'Good' : score >= 4 ? 'Needs Attention' : 'Poor';
+    const total      = (result.sentiment.friendly||0) + (result.sentiment.neutral||0) + (result.sentiment.unfriendly||0) || 1;
+    const fp         = Math.round(result.sentiment.friendly   / total * 100);
+    const np         = Math.round(result.sentiment.neutral    / total * 100);
+    const up         = Math.round(result.sentiment.unfriendly / total * 100);
+
+    const toxRows = result.toxicityTypes
+      ? Object.entries(result.toxicityTypes).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1])
+          .map(([k,v]) => `<tr><td style="padding:6px 12px;border-bottom:1px solid #f3f4f6;text-transform:capitalize">${k}</td><td style="padding:6px 12px;border-bottom:1px solid #f3f4f6;font-weight:bold;color:#f97316">${v}</td></tr>`).join('')
+      : '<tr><td colspan="2" style="padding:8px 12px;color:#6b7280">No toxicity detected</td></tr>';
+
+    const flagRows = result.flaggedMessages?.length > 0
+      ? result.flaggedMessages.sort((a,b)=>b.severity-a.severity)
+          .map(f => {
+            const sevColor = f.severity >= 8 ? '#ef4444' : f.severity >= 5 ? '#f59e0b' : '#6b7280';
+            return `<tr>
+              <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:13px">${f.message}</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-transform:capitalize;font-size:13px">${f.type}</td>
+              <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-weight:bold;color:${sevColor};font-size:13px">${f.severity}/10</td>
+            </tr>`;
+          }).join('')
+      : '<tr><td colspan="3" style="padding:8px 12px;color:#22c55e">✅ No flagged messages</td></tr>';
+
+    const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif">
+<div style="max-width:640px;margin:32px auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)">
+
+  <!-- HEADER -->
+  <div style="background:linear-gradient(135deg,#f97316,#fb923c);padding:32px 40px">
+    <div style="font-size:13px;color:rgba(255,255,255,0.8);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Vibe Check Bot Report</div>
+    <h1 style="margin:0;color:#ffffff;font-size:26px;font-weight:700">${serverName}</h1>
+    <div style="margin-top:8px;color:rgba(255,255,255,0.9);font-size:14px">
+      Server ID: ${serverId} &nbsp;•&nbsp; ${new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}
+    </div>
+  </div>
+
+  <!-- SCORE HERO -->
+  <div style="background:#fff7ed;padding:32px 40px;text-align:center;border-bottom:1px solid #fed7aa">
+    <div style="font-size:13px;color:#9a3412;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">Friendliness Score</div>
+    <div style="font-size:72px;font-weight:800;color:${scoreColor};line-height:1">${score}</div>
+    <div style="font-size:18px;color:#6b7280;margin-top:4px">/10 &nbsp;—&nbsp; <strong style="color:${scoreColor}">${scoreLabel}</strong></div>
+    <div style="margin-top:16px;font-size:28px;letter-spacing:2px;color:${scoreColor}">${'█'.repeat(Math.round(score))}${'░'.repeat(10-Math.round(score))}</div>
+  </div>
+
+  <!-- METADATA -->
+  <div style="padding:24px 40px;background:#f9fafb;border-bottom:1px solid #e5e7eb;display:flex;gap:24px;flex-wrap:wrap">
+    <div style="flex:1;min-width:140px">
+      <div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Channels</div>
+      <div style="margin-top:4px;font-weight:600;color:#111827">${channelNames.join(', ')}</div>
+    </div>
+    <div style="flex:1;min-width:120px">
+      <div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Messages Analyzed</div>
+      <div style="margin-top:4px;font-weight:600;color:#111827">${analyzedCount}</div>
+    </div>
+    <div style="flex:1;min-width:120px">
+      <div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Timeframe</div>
+      <div style="margin-top:4px;font-weight:600;color:#111827">${timeframe}</div>
+    </div>
+    <div style="flex:1;min-width:120px">
+      <div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Sensitivity</div>
+      <div style="margin-top:4px;font-weight:600;color:#111827;text-transform:capitalize">${sensitivity}</div>
+    </div>
+    <div style="flex:1;min-width:120px">
+      <div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Reports Remaining</div>
+      <div style="margin-top:4px;font-weight:600;color:#111827">${remaining}</div>
+    </div>
+  </div>
+
+  <!-- SENTIMENT -->
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb">
+    <h2 style="margin:0 0 20px;font-size:16px;color:#111827;font-weight:700">💬 Sentiment Breakdown</h2>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <div style="flex:1;min-width:140px;background:#f0fdf4;border-radius:12px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:800;color:#22c55e">${fp}%</div>
+        <div style="font-size:13px;color:#15803d;margin-top:4px">🟢 Friendly</div>
+        <div style="font-size:12px;color:#6b7280;margin-top:2px">${result.sentiment.friendly} messages</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#f8fafc;border-radius:12px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:800;color:#94a3b8">${np}%</div>
+        <div style="font-size:13px;color:#475569;margin-top:4px">⚪ Neutral</div>
+        <div style="font-size:12px;color:#6b7280;margin-top:2px">${result.sentiment.neutral} messages</div>
+      </div>
+      <div style="flex:1;min-width:140px;background:#fef2f2;border-radius:12px;padding:16px;text-align:center">
+        <div style="font-size:28px;font-weight:800;color:#ef4444">${up}%</div>
+        <div style="font-size:13px;color:#b91c1c;margin-top:4px">🔴 Unfriendly</div>
+        <div style="font-size:12px;color:#6b7280;margin-top:2px">${result.sentiment.unfriendly} messages</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- COMMUNITY STRENGTHS -->
+  ${result.communityStrengths ? `
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb;background:#f0fdf4">
+    <h2 style="margin:0 0 12px;font-size:16px;color:#111827;font-weight:700">✨ Community Strengths</h2>
+    <p style="margin:0;color:#15803d;font-size:15px;line-height:1.6">${result.communityStrengths}</p>
+  </div>` : ''}
+
+  <!-- SUMMARY -->
+  ${result.summary ? `
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb">
+    <h2 style="margin:0 0 12px;font-size:16px;color:#111827;font-weight:700">🗒️ Vibe Verdict</h2>
+    <p style="margin:0;color:#374151;font-size:15px;line-height:1.6">${result.summary}</p>
+  </div>` : ''}
+
+  <!-- RECOMMENDATIONS -->
+  ${result.recommendation ? `
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb;background:#fff7ed">
+    <h2 style="margin:0 0 12px;font-size:16px;color:#111827;font-weight:700">💡 Recommendations</h2>
+    <p style="margin:0;color:#9a3412;font-size:15px;line-height:1.6">${result.recommendation}</p>
+  </div>` : ''}
+
+  <!-- TOXICITY BREAKDOWN -->
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb">
+    <h2 style="margin:0 0 16px;font-size:16px;color:#111827;font-weight:700">🧪 Toxicity Breakdown</h2>
+    <table style="width:100%;border-collapse:collapse;background:#f9fafb;border-radius:10px;overflow:hidden">
+      <thead>
+        <tr style="background:#f3f4f6">
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280;font-weight:600;text-transform:uppercase">Type</th>
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280;font-weight:600;text-transform:uppercase">Count</th>
+        </tr>
+      </thead>
+      <tbody>${toxRows}</tbody>
+    </table>
+  </div>
+
+  <!-- FLAGGED MESSAGES -->
+  <div style="padding:32px 40px;border-bottom:1px solid #e5e7eb">
+    <h2 style="margin:0 0 16px;font-size:16px;color:#111827;font-weight:700">⚠️ All Flagged Messages <span style="font-size:13px;color:#6b7280;font-weight:400">(${result.flaggedMessages?.length||0} total)</span></h2>
+    <table style="width:100%;border-collapse:collapse;background:#f9fafb;border-radius:10px;overflow:hidden">
+      <thead>
+        <tr style="background:#f3f4f6">
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280;font-weight:600;text-transform:uppercase">Message</th>
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280;font-weight:600;text-transform:uppercase">Type</th>
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#6b7280;font-weight:600;text-transform:uppercase">Severity</th>
+        </tr>
+      </thead>
+      <tbody>${flagRows}</tbody>
+    </table>
+  </div>
+
+  <!-- FOOTER -->
+  <div style="padding:24px 40px;background:#f9fafb;text-align:center">
+    <div style="font-size:13px;color:#9ca3af">Vibe Check Bot &nbsp;•&nbsp; <a href="https://www.vibecheckbot.com" style="color:#f97316;text-decoration:none">vibecheckbot.com</a></div>
+    <div style="font-size:12px;color:#d1d5db;margin-top:4px">This report was automatically generated after a /vibe command was run in ${serverName}</div>
+  </div>
+
+</div>
+</body>
+</html>`;
+
+    const result2 = await resend.emails.send({
+      from: 'Vibe Check Bot <reports@vibecheckbot.com>',
+      to: CONFIG.REPORT_EMAIL,
+      subject: `${scoreEmoji(score)} Vibe Report — ${serverName} | ${score}/10 ${scoreLabel} | ${channelNames.join(', ')}`,
+      html
     });
+
+    if (result2.error) console.error('Email send error:', result2.error);
+    else console.log(`Email sent to ${CONFIG.REPORT_EMAIL} for ${serverName}`);
+
   } catch (e) { console.error('Email error:', e.message); }
 }
 
