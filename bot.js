@@ -1,7 +1,16 @@
 const http = require('http');
 // ============================================================
-// VIBE CHECK BOT v2.3
+// VIBE CHECK BOT v2.4
 // ============================================================
+
+// 1. RAILWAY INSTANT-BOOT (Must be at the top)
+const PORT = process.env.PORT || 8080;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Vibe Check 2.4 Active');
+}).listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Railway Health Check online on port ${PORT}`);
+});
 
 require('dotenv').config();
 const {
@@ -14,7 +23,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType
+  ChannelType,
+  MessageFlags
 } = require('discord.js');
 const OpenAI = require('openai');
 const { Resend } = require('resend');
@@ -87,6 +97,9 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
+
+// Prevent Discord.js internal errors from crashing the process
+client.on('error', err => console.error('Discord client error:', err));
 
 // ============================================================
 // USAGE TRACKING
@@ -367,71 +380,55 @@ function cumulativeToxChart(reports) {
 function calcBehaviorProbability(reports) {
   if (reports.length < 2) return null;
 
-  // Confidence based on number of reports
   const confidence = reports.length >= 8 ? 'High' : reports.length >= 3 ? 'Medium' : 'Low';
   const confidenceEmoji = confidence === 'High' ? '🟢' : confidence === 'Medium' ? '🟡' : '🔴';
 
-  let improveScore = 50; // start neutral
+  let improveScore = 50;
   const factors = [];
 
-  // Factor 1: Score momentum (last 3 vs older) — weight 30
   if (reports.length >= 3) {
     const recentAvg = reports.slice(-3).reduce((s,r) => s + r.score, 0) / 3;
     const olderAvg  = reports.slice(0,-3).reduce((s,r) => s + r.score, 0) / Math.max(reports.length - 3, 1);
     const momentum  = recentAvg - olderAvg;
     const impact    = Math.min(Math.abs(momentum) * 8, 25);
-    if (momentum > 0)  { improveScore += impact; factors.push(`Score trending up +${momentum.toFixed(1)} pts recently`); }
-    else if (momentum < 0) { improveScore -= impact; factors.push(`Score trending down ${momentum.toFixed(1)} pts recently`); }
+    if (momentum > 0)       { improveScore += impact; factors.push(`Score trending up +${momentum.toFixed(1)} pts recently`); }
+    else if (momentum < 0)  { improveScore -= impact; factors.push(`Score trending down ${momentum.toFixed(1)} pts recently`); }
   }
 
-  // Factor 2: Latest vs oldest score — weight 20
   const overallDiff = reports[reports.length-1].score - reports[0].score;
-  if (overallDiff > 0)  { improveScore += Math.min(overallDiff * 4, 15); factors.push(`Overall score improved +${overallDiff.toFixed(1)} pts`); }
+  if (overallDiff > 0)      { improveScore += Math.min(overallDiff * 4, 15); factors.push(`Overall score improved +${overallDiff.toFixed(1)} pts`); }
   else if (overallDiff < 0) { improveScore -= Math.min(Math.abs(overallDiff) * 4, 15); factors.push(`Overall score dropped ${overallDiff.toFixed(1)} pts`); }
 
-  // Factor 3: Unfriendly % trend — weight 20
   const sd = (n, d) => d === 0 ? 0 : Math.round(n / d * 100);
   const firstTot  = (reports[0].friendly||0)+(reports[0].neutral||0)+(reports[0].unfriendly||0)||1;
   const latestTot = (reports[reports.length-1].friendly||0)+(reports[reports.length-1].neutral||0)+(reports[reports.length-1].unfriendly||0)||1;
   const uFirst = sd(reports[0].unfriendly||0, firstTot);
   const uLast  = sd(reports[reports.length-1].unfriendly||0, latestTot);
   const uDelta = uLast - uFirst;
-  if (uDelta < -3)  { improveScore += Math.min(Math.abs(uDelta) * 1.5, 15); factors.push(`Unfriendly messages decreasing (${uFirst}% to ${uLast}%)`); }
-  else if (uDelta > 3) { improveScore -= Math.min(uDelta * 1.5, 15); factors.push(`Unfriendly messages rising (${uFirst}% to ${uLast}%)`); }
+  if (uDelta < -3)      { improveScore += Math.min(Math.abs(uDelta) * 1.5, 15); factors.push(`Unfriendly messages decreasing (${uFirst}% to ${uLast}%)`); }
+  else if (uDelta > 3)  { improveScore -= Math.min(uDelta * 1.5, 15); factors.push(`Unfriendly messages rising (${uFirst}% to ${uLast}%)`); }
 
-  // Factor 4: Flagged message trend — weight 15
   const flagFirst  = reports[0].flagged_count || 0;
   const flagLatest = reports[reports.length-1].flagged_count || 0;
-  if (flagLatest < flagFirst && flagFirst > 0) { improveScore += 8; factors.push(`Flagged messages down (${flagFirst} to ${flagLatest})`); }
-  else if (flagLatest > flagFirst * 1.3)       { improveScore -= 10; factors.push(`Flagged messages spiking (${flagFirst} to ${flagLatest})`); }
+  if (flagLatest < flagFirst && flagFirst > 0)  { improveScore += 8;  factors.push(`Flagged messages down (${flagFirst} to ${flagLatest})`); }
+  else if (flagLatest > flagFirst * 1.3)         { improveScore -= 10; factors.push(`Flagged messages spiking (${flagFirst} to ${flagLatest})`); }
 
-  // Factor 5: Toxicity severity — weight 15
   const latestTox = (() => {
     try { return typeof reports[reports.length-1].toxicity_types === 'string' ? JSON.parse(reports[reports.length-1].toxicity_types) : (reports[reports.length-1].toxicity_types || {}); }
     catch { return {}; }
   })();
   const severeTypes = ['harassment', 'threats', 'hate_speech', 'bullying'];
   const severeCount = severeTypes.reduce((s, k) => s + (latestTox[k]||0), 0);
-  if (severeCount === 0)   { improveScore += 8;  factors.push('No severe toxicity in latest report'); }
-  else if (severeCount > 5){ improveScore -= 12; factors.push(`High severe toxicity (${severeCount} instances) in latest report`); }
-  else                     { improveScore -= 5;  factors.push(`Some severe toxicity (${severeCount} instances) in latest report`); }
+  if (severeCount === 0)    { improveScore += 8;  factors.push('No severe toxicity in latest report'); }
+  else if (severeCount > 5) { improveScore -= 12; factors.push(`High severe toxicity (${severeCount} instances) in latest report`); }
+  else                      { improveScore -= 5;  factors.push(`Some severe toxicity (${severeCount} instances) in latest report`); }
 
-  // Clamp to 5–95%
   improveScore = Math.min(Math.max(Math.round(improveScore), 5), 95);
   const worsenScore = 100 - improveScore;
-
   const improveTrend = improveScore >= 70 ? '📈' : improveScore >= 50 ? '🟡' : '📉';
   const worsenTrend  = worsenScore >= 50 ? '⚠️' : '✅';
 
-  return {
-    improveChance: improveScore,
-    worsenChance:  worsenScore,
-    confidence,
-    confidenceEmoji,
-    factors,
-    improveTrend,
-    worsenTrend
-  };
+  return { improveChance: improveScore, worsenChance: worsenScore, confidence, confidenceEmoji, factors, improveTrend, worsenTrend };
 }
 
 // ============================================================
@@ -519,7 +516,6 @@ function scoreLabel(s) { return s >= 8 ? 'Excellent' : s >= 6 ? 'Good' : s >= 4 
 
 // ============================================================
 // BUILD /vibe EMBEDS
-// Layout: 1) Descriptive analysis  2) Toxicity  3) Impact score  4) Sentiment  5) Flagged
 // ============================================================
 
 function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions, isPublic, channelMsgCounts, channelResults, memberCount) {
@@ -532,32 +528,23 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
   const isMultiChannel = channelNames.length > 1;
   const chDisplay = isMultiChannel ? channelNames.join(', ') : channelNames[0];
 
-  // ── EMBED 1: Descriptive Analysis ──
   const embed1 = new EmbedBuilder()
     .setColor(scoreColor(score))
     .setTitle(isMultiChannel ? '📊 Multi-Channel Vibe Report' : '📊 Community Vibe Report')
     .setDescription(
       `**${chDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages • Sensitivity: **${sensitivity.charAt(0).toUpperCase()+sensitivity.slice(1)}**\n\n` +
-      `\`\`\`\n${scoreEmoji(score)}  FRIENDLINESS SCORE: ${score} / 10  —  ${scoreLabel(score).toUpperCase()}\n\`\`\`\n` +
+      `\`\`\`\n${scoreEmoji(score)}  FRIENDLINESS SCORE: ${score} / 10  — ${scoreLabel(score).toUpperCase()}\n\`\`\`\n` +
       `\`${scoreBar(score)}\``
     )
     .addFields({ name: '📋 Server Info', value: `👥 Members: **${memberCount||'—'}**`, inline: false });
 
-  if (result.communityStrengths) {
-    embed1.addFields({ name: '✨ Community Strengths', value: result.communityStrengths, inline: false });
-  }
-  if (result.summary) {
-    embed1.addFields({ name: '🗒️ Vibe Verdict', value: result.summary, inline: false });
-  }
-  if (result.recommendation) {
-    embed1.addFields({ name: '💡 Recommendations', value: result.recommendation, inline: false });
-  }
+  if (result.communityStrengths) embed1.addFields({ name: '✨ Community Strengths', value: result.communityStrengths, inline: false });
+  if (result.summary)            embed1.addFields({ name: '🗒️ Vibe Verdict',         value: result.summary,            inline: false });
+  if (result.recommendation)    embed1.addFields({ name: '💡 Recommendations',       value: result.recommendation,    inline: false });
   embed1.addFields({ name: '🔧 Need Help?', value: `📧 **${CONFIG.CONTACT_EMAIL}**`, inline: false });
   embed1.setFooter({ text: `Vibe Check Bot • ${isPaidServer?'⚡ Pro':'🎁 Free Trial'} • ${remaining} ${remaining===1?'report':'reports'} remaining • Sensitivity: ${sensitivity}` });
 
-  // ── EMBED 2: Toxicity ──
   const embed2 = new EmbedBuilder().setColor(0xf97316).setTitle('🧪 Toxicity Breakdown');
-
   if (isPublic) {
     const fc = result.flaggedMessages?.length || 0;
     embed2.setDescription(fc > 0 ? `**${fc} flagged messages** detected.` : '✅ No harmful content detected.');
@@ -584,21 +571,15 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
       embed2.addFields({ name: '✅ No Flagged Messages', value: 'No harmful content detected.', inline: false });
     }
   }
-
-  // Attach toxicity bar chart to embed2
   if (!isPublic && result.toxicityTypes) {
     const tUrl = toxBarChart(result.toxicityTypes, 'Toxicity Types');
     if (tUrl) embed2.setImage(tUrl);
   }
 
-  // ── EMBED 3: Impact Score (multi-channel only) ──
   let embed3 = null;
   if (isMultiChannel) {
     embed3 = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`⚡ Impact Score: ${score}/10`);
-    embed3.setDescription(
-      `The Impact Score is the **weighted average** across all channels, based on message volume.\n` +
-      `Channels where members spend more time have greater influence on this score.`
-    );
+    embed3.setDescription(`The Impact Score is the **weighted average** across all channels, based on message volume.\nChannels where members spend more time have greater influence on this score.`);
     embed3.addFields({
       name: 'Per-Channel Breakdown',
       value: channelNames.map(ch => {
@@ -610,7 +591,6 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
     });
   }
 
-  // ── EMBED 4: Sentiment + pie chart ──
   const embed4 = new EmbedBuilder()
     .setColor(scoreColor(score))
     .setTitle('💬 Sentiment Breakdown')
@@ -624,7 +604,6 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
     })
     .setImage(pieChart(friendly, neutral, unfriendly));
 
-  // ── EMBED 5: Reactions ──
   let embed5 = null;
   if (reactions && !isPublic && (reactions.mostReacted || reactions.mostPositive || reactions.mostNegative)) {
     embed5 = new EmbedBuilder().setColor(0x6366f1).setTitle('💬 Most Reacted Messages');
@@ -667,7 +646,7 @@ async function logResearchData(data) {
         score: r ? r.result.friendlinessScore : data.score,
         friendly:    r ? r.result.sentiment.friendly    : 0,
         neutral:     r ? r.result.sentiment.neutral     : 0,
-        unfriendly: r ? r.result.sentiment.unfriendly : 0,
+        unfriendly:  r ? r.result.sentiment.unfriendly  : 0,
         flagged_count: r ? (r.result.flaggedMessages?.length||0) : data.flaggedCount,
         toxicity_types: r ? (r.result.toxicityTypes||{}) : data.toxicityTypes,
         sensitivity: data.sensitivity, timeframe: data.timeframe, is_pro: data.isPro,
@@ -762,7 +741,7 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [vibe.toJSON(), progress.toJSON(), admin.toJSON()] });
-    console.log('Commands registered');
+    console.log('✅ Commands registered');
   } catch (e) { console.error('Failed to register commands:', e); }
 }
 
@@ -770,11 +749,10 @@ async function registerCommands() {
 // BOT READY + GUILD EVENTS
 // ============================================================
 
-client.once('ready', () => {
-  console.log('');
+client.once('clientReady', c => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  VIBE CHECK BOT IS ONLINE');
-  console.log(`  Bot: ${client.user.tag}  |  Servers: ${client.guilds.cache.size}`);
+  console.log(`🚀 Vibe Check Bot 2.4 is online: ${c.user.tag}`);
+  console.log(`   Servers: ${c.guilds.cache.size}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   registerCommands();
 });
@@ -790,6 +768,7 @@ client.on('guildCreate', async guild => {
       .setFooter({text:'How friendly is your community?'})] });
   } catch (e) { console.error('guildCreate error:', e.message); }
 });
+
 client.on('guildDelete', g => console.log(`Removed from: ${g.name} (${g.id})`));
 
 // ============================================================
@@ -797,15 +776,35 @@ client.on('guildDelete', g => console.log(`Removed from: ${g.name} (${g.id})`));
 // ============================================================
 
 client.on('interactionCreate', async interaction => {
-  if (interaction.isButton() && interaction.customId === 'view_progress') { await handleProgressCommand(interaction, '10', []); return; }
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName === 'vibe')          { await handleVibeCommand(interaction); return; }
-  if (interaction.commandName === 'vibe-progress') {
-    const range = interaction.options.getString('range') || '10';
-    const filterChannels = [interaction.options.getChannel('channel'),interaction.options.getChannel('channel2'),interaction.options.getChannel('channel3')].filter(Boolean);
-    await handleProgressCommand(interaction, range, filterChannels); return;
+  try {
+    if (interaction.isButton() && interaction.customId === 'view_progress') {
+      await handleProgressCommand(interaction, '10', []);
+      return;
+    }
+
+    if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'vibe')          { await handleVibeCommand(interaction);    return; }
+    if (interaction.commandName === 'vibe-progress') {
+      const range = interaction.options.getString('range') || '10';
+      const filterChannels = [
+        interaction.options.getChannel('channel'),
+        interaction.options.getChannel('channel2'),
+        interaction.options.getChannel('channel3')
+      ].filter(Boolean);
+      await handleProgressCommand(interaction, range, filterChannels);
+      return;
+    }
+    if (interaction.commandName === 'vibe-admin') { await handleAdminCommand(interaction); return; }
+
+  } catch (err) {
+    console.error('Interaction error:', err);
+    try {
+      const msg = { content: '❌ Something went wrong. Please try again.', flags: MessageFlags.Ephemeral };
+      if (interaction.replied || interaction.deferred) await interaction.followUp(msg);
+      else await interaction.reply(msg);
+    } catch {}
   }
-  if (interaction.commandName === 'vibe-admin') { await handleAdminCommand(interaction); return; }
 });
 
 // ============================================================
@@ -815,8 +814,8 @@ client.on('interactionCreate', async interaction => {
 async function handleVibeCommand(interaction) {
   const serverId = interaction.guildId, serverName = interaction.guild.name;
 
-  if (isOnCooldown(interaction.user.id)) return interaction.reply({content:`Please wait ${CONFIG.COOLDOWN_SECONDS}s between reports.`,ephemeral:true});
-  if (isServerThrottled(serverId))         return interaction.reply({content:`Too many reports at once. Wait a minute.`,ephemeral:true});
+  if (isOnCooldown(interaction.user.id)) return interaction.reply({ content: `Please wait ${CONFIG.COOLDOWN_SECONDS}s between reports.`, flags: MessageFlags.Ephemeral });
+  if (isServerThrottled(serverId))       return interaction.reply({ content: `Too many reports at once. Wait a minute.`,               flags: MessageFlags.Ephemeral });
   incrementServerThrottle(serverId);
 
   const visibility   = interaction.options.getString('visibility')  || 'private';
@@ -843,26 +842,26 @@ async function handleVibeCommand(interaction) {
     if (serverIsPaid) {
       const {data:ud} = await supabase.from('usage').select('month_start').eq('server_id',serverId).single();
       const dLeft = Math.max(1, Math.ceil(30 - ((Date.now() - new Date(ud?.month_start||Date.now()).getTime()) / 86400000)));
-      return interaction.reply({embeds:[new EmbedBuilder().setColor(0xf59e0b).setTitle('Monthly Limit Reached').setDescription(`All ${CONFIG.PRO_REPORTS_PER_MONTH} reports used. Resets in **${dLeft} day${dLeft===1?'':'s'}**.`)],ephemeral:true});
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('Monthly Limit Reached').setDescription(`All ${CONFIG.PRO_REPORTS_PER_MONTH} reports used. Resets in **${dLeft} day${dLeft===1?'':'s'}**.`)], flags: MessageFlags.Ephemeral });
     } else {
       await sendTrialEndedEmail(serverName, serverId, interaction.user.tag);
       return interaction.reply({
-        embeds:[new EmbedBuilder().setColor(0xf59e0b).setTitle('Free Trial Ended').setDescription(`All **${CONFIG.FREE_REPORTS}** free reports used.`)
+        embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('Free Trial Ended').setDescription(`All **${CONFIG.FREE_REPORTS}** free reports used.`)
           .addFields({name:'Upgrade to Pro',value:`30 reports/month • Multi-channel`},{name:'Monthly',value:`[$8.99/mo](${CONFIG.STRIPE_MONTHLY_LINK})`,inline:true},{name:'Yearly',value:`[$99/yr](${CONFIG.STRIPE_YEARLY_LINK})`,inline:true})],
-        components:[new ActionRowBuilder().addComponents(
+        components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setLabel('Get Pro Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
-          ...(CONFIG.YEARLY_ENABLED?[new ButtonBuilder().setLabel('Get Pro Yearly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)]:[])
+          ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('Get Pro Yearly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
         )],
-        ephemeral:true
+        flags: MessageFlags.Ephemeral
       });
     }
   }
 
-  await interaction.deferReply({ephemeral:isPrivate});
+  await interaction.deferReply({ flags: isPrivate ? MessageFlags.Ephemeral : 0 });
   setCooldown(interaction.user.id);
 
   try {
-    const timeMs = {'1h':3600000,'24h':86400000,'7d':604800000,'14d':1209600000,'30d':2592000000}[timeframe]||604800000;
+    const timeMs    = {'1h':3600000,'24h':86400000,'7d':604800000,'14d':1209600000,'30d':2592000000}[timeframe]||604800000;
     const timeLabel = {'1h':'1 hour','24h':'24 hours','7d':'7 days','14d':'14 days','30d':'30 days'}[timeframe]||'7 days';
     const mpc = Math.floor(msgCount / channels.length);
 
@@ -896,8 +895,8 @@ async function handleVibeCommand(interaction) {
     const cSent = {friendly:0,neutral:0,unfriendly:0}, cTox = {}, cFlagged = [];
     let cStrengths = '', cRec = '', cSummary = '';
     for (const [,r] of valid) {
-      cSent.friendly    += r.result.sentiment.friendly    || 0;
-      cSent.neutral     += r.result.sentiment.neutral     || 0;
+      cSent.friendly   += r.result.sentiment.friendly   || 0;
+      cSent.neutral    += r.result.sentiment.neutral    || 0;
       cSent.unfriendly += r.result.sentiment.unfriendly || 0;
       if (r.result.toxicityTypes) Object.entries(r.result.toxicityTypes).forEach(([k,v]) => { cTox[k] = (cTox[k]||0)+(v||0); });
       if (r.result.flaggedMessages) cFlagged.push(...r.result.flaggedMessages);
@@ -909,8 +908,8 @@ async function handleVibeCommand(interaction) {
       cSummary   = `Impact score across ${valid.length} channels: ${impact}/10. ${worst[0]} has the most opportunity for growth.`;
     } else {
       cStrengths = valid[0][1].result.communityStrengths || '';
-      cRec       = valid[0][1].result.recommendation || '';
-      cSummary   = valid[0][1].result.summary || '';
+      cRec       = valid[0][1].result.recommendation     || '';
+      cSummary   = valid[0][1].result.summary            || '';
     }
 
     const result = {
@@ -934,34 +933,34 @@ async function handleVibeCommand(interaction) {
     );
     if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
 
-    await interaction.editReply({embeds, components:[buttons]});
+    await interaction.editReply({ embeds, components: [buttons] });
 
-    await saveReport(serverId,serverName,channelNames,result.friendlinessScore,result.sentiment,result.flaggedMessages?.length||0,sensitivity,timeframe,totAnalyzed,result.toxicityTypes);
-    await logResearchData({serverName,serverId,memberCount:interaction.guild.memberCount,channelNames,channelResults,analyzedCount:totAnalyzed,score:result.friendlinessScore,sentiment:result.sentiment,flaggedCount:result.flaggedMessages?.length||0,toxicityTypes:result.toxicityTypes,sensitivity,timeframe,isPro:serverIsPaid,inputTokens:totIn,outputTokens:totOut,cost:totCost,processingTime:totTime});
-    await sendEmailReport(serverName,serverId,channelNames,result,totAnalyzed,timeLabel,sensitivity,remaining);
+    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes);
+    await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
+    await sendEmailReport(serverName, serverId, channelNames, result, totAnalyzed, timeLabel, sensitivity, remaining);
 
     const usedNow = await getReportsUsed(serverId);
     if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
 
     if (usedNow % 5 === 0 && usedNow > 0) {
       await interaction.followUp({
-        embeds:[new EmbedBuilder().setColor(0xA78BFA).setDescription(`🎉 **${usedNow} reports** done! Track your community's growth.`)],
-        components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress'))],
-        ephemeral:true
+        embeds: [new EmbedBuilder().setColor(0xA78BFA).setDescription(`🎉 **${usedNow} reports** done! Track your community's growth.`)],
+        components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress'))],
+        flags: MessageFlags.Ephemeral
       });
     }
 
     if (!serverIsPaid && !tester && remaining > 0 && remaining <= 2) {
-      await interaction.followUp({embeds:[new EmbedBuilder().setColor(0xf59e0b).setDescription(`Only **${remaining}** free ${remaining===1?'report':'reports'} left. [Get Pro](${CONFIG.STRIPE_MONTHLY_LINK}).`)],ephemeral:true});
+      await interaction.followUp({ embeds: [new EmbedBuilder().setColor(0xf59e0b).setDescription(`Only **${remaining}** free ${remaining===1?'report':'reports'} left. [Get Pro](${CONFIG.STRIPE_MONTHLY_LINK}).`)], flags: MessageFlags.Ephemeral });
     }
 
     if (serverIsPaid) {
       const sub = await getSubscriptionStatus(serverId);
       if (sub.isActive && sub.daysLeft <= 7) {
         await interaction.followUp({
-          embeds:[new EmbedBuilder().setColor(0xf59e0b).setTitle('Subscription Expiring Soon').setDescription(`Pro expires in **${sub.daysLeft} day${sub.daysLeft===1?'':'s'}**.`)],
-          components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Renew Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK))],
-          ephemeral:true
+          embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('Subscription Expiring Soon').setDescription(`Pro expires in **${sub.daysLeft} day${sub.daysLeft===1?'':'s'}**.`)],
+          components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Renew Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK))],
+          flags: MessageFlags.Ephemeral
         });
       }
     }
@@ -974,24 +973,18 @@ async function handleVibeCommand(interaction) {
 
 // ============================================================
 // /vibe-progress HANDLER
-// Layout: 1) Descriptive analysis + score chart
-//          2) Toxicity breakdown + toxicity chart
-//          3) Impact score over time + impact chart
-//          4) Sentiment evolution + stacked chart
-//          5) Flagged trend + flagged chart
-//          6) Behavior probability + predictions + recommendations
 // ============================================================
 
 async function handleProgressCommand(interaction, range, filterChannels) {
   const serverId = interaction.guildId;
-  await interaction.deferReply({ephemeral:true});
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   try {
-    let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', {ascending:false});
+    let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', { ascending: false });
     if (range === '30d') q = q.gte('created_at', new Date(Date.now()-30*86400000).toISOString());
     else q = q.limit(parseInt(range)||10);
 
-    const {data:reports, error} = await q;
+    const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
 
     const sorted = [...reports].reverse();
@@ -1003,11 +996,11 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       if (!filtered.length) return interaction.editReply(`No reports for ${n}. Run /vibe there first.`);
     }
 
-    const latest    = filtered[filtered.length-1];
-    const oldest    = filtered[0];
-    const avg       = (filtered.reduce((s,r) => s+r.score, 0) / filtered.length).toFixed(1);
-    const diff      = parseFloat((latest.score - oldest.score).toFixed(1));
-    const arrow      = diff > 0 ? `📈 +${diff}` : diff < 0 ? `📉 ${diff}` : '➡️ Stable';
+    const latest = filtered[filtered.length-1];
+    const oldest = filtered[0];
+    const avg    = (filtered.reduce((s,r) => s+r.score, 0) / filtered.length).toFixed(1);
+    const diff   = parseFloat((latest.score - oldest.score).toFixed(1));
+    const arrow  = diff > 0 ? `📈 +${diff}` : diff < 0 ? `📉 ${diff}` : '➡️ Stable';
 
     const sd = (n,d) => d===0?0:Math.round(n/d*100);
     const ot = (oldest.friendly||0)+(oldest.neutral||0)+(oldest.unfriendly||0)||1;
@@ -1023,11 +1016,8 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     const toxEntries = Object.entries(toxMap).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
 
     const fFlag = oldest.flagged_count||0, lFlag = latest.flagged_count||0;
+    const prob  = calcBehaviorProbability(filtered);
 
-    // Behavior probability
-    const prob = calcBehaviorProbability(filtered);
-
-    // ── EMBED 1: Descriptive Analysis + Score Chart ──
     const trendText = (() => {
       if (filtered.length < 2) return 'Only one report so far — run `/vibe` again to start tracking trends.';
       if (diff >= 2)    return `🚀 **Major improvement!** Score up **+${diff} pts**. Your community is flourishing.`;
@@ -1042,14 +1032,14 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     if (latest.score >= 8)      healthLines.push(`✨ **Thriving** — Your community is in excellent health at ${latest.score}/10.`);
     else if (latest.score >= 6) healthLines.push(`👍 **Healthy** — Generally positive at ${latest.score}/10.`);
     else if (latest.score >= 4) healthLines.push(`⚠️ **Mixed** — Score of ${latest.score}/10 shows room to grow.`);
-    else                          healthLines.push(`🚨 **Needs attention** — Score of ${latest.score}/10. Time to invest in community building.`);
+    else                         healthLines.push(`🚨 **Needs attention** — Score of ${latest.score}/10. Time to invest in community building.`);
 
     if (fLast >= 70)      healthLines.push(`🟢 **${fLast}% friendly** — your community is warm and welcoming.`);
     else if (fLast >= 50) healthLines.push(`🟡 **${fLast}% friendly** — mostly positive with room to grow.`);
     else                   healthLines.push(`🔴 **Only ${fLast}% friendly** — there is a great opportunity to build more connection and belonging.`);
 
-    if (diff > 0)  healthLines.push(`📈 Score improved **+${diff} pts** since first report — your community is on an upward journey.`);
-    else if (diff < 0) healthLines.push(`📉 Score down **${diff} pts** — this is an invitation to reinvest in what makes your community special.`);
+    if (diff > 0)       healthLines.push(`📈 Score improved **+${diff} pts** since first report — your community is on an upward journey.`);
+    else if (diff < 0)  healthLines.push(`📉 Score down **${diff} pts** — this is an invitation to reinvest in what makes your community special.`);
     if (toxEntries.length > 0) healthLines.push(`⚠️ Most common issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} instances) — see toxicity section below.`);
 
     const e1 = new EmbedBuilder()
@@ -1057,24 +1047,22 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
       .setDescription(`**${filtered.length} report${filtered.length===1?'':'s'}**${filterLabel}  •  Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** •  ${arrow}\nAverage: **${avg}/10**`)
       .addFields(
-        {name: '🎯 Trend Analysis',    value: trendText,               inline: false},
-        {name: '🔍 Community Health',  value: healthLines.join('\n'), inline: false}
+        { name: '🎯 Trend Analysis',   value: trendText,               inline: false },
+        { name: '🔍 Community Health', value: healthLines.join('\n'), inline: false }
       )
       .setImage(scoreLineChart(filtered))
-      .setFooter({text: `Vibe Check Bot  •  ${filtered.length} reports  •  Run /vibe regularly to improve predictions`});
+      .setFooter({ text: `Vibe Check Bot  •  ${filtered.length} reports  •  Run /vibe regularly to improve predictions` });
 
-    // ── EMBED 2: Toxicity + chart ──
     const toxText = toxEntries.length > 0
       ? toxEntries.slice(0,6).map(([k,v]) => { const f=Math.round(v/(toxEntries[0][1]||1)*10); return `\`${'█'.repeat(f)}${'░'.repeat(10-f)}\` **${k}**: ${v}`; }).join('\n')
       : '✅ No toxicity detected across all reports';
 
     const e2 = new EmbedBuilder().setColor(0xf97316).setTitle('🧪 Cumulative Toxicity Breakdown')
-      .addFields({name: 'All Reports Combined', value: toxText, inline: false});
+      .addFields({ name: 'All Reports Combined', value: toxText, inline: false });
     const toxUrl2 = cumulativeToxChart(filtered);
     if (toxUrl2) e2.setImage(toxUrl2);
 
-    // ── EMBED 3: Impact Score over time ──
-    const allChs = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
+    const allChs  = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
     const isMulti = allChs.length > 1;
     const e3 = new EmbedBuilder().setColor(0x8b5cf6).setTitle(isMulti ? '⚡ Impact Score Over Time' : '📊 Friendliness Score Over Time');
     if (isMulti) {
@@ -1084,13 +1072,12 @@ async function handleProgressCommand(interaction, range, filterChannels) {
         const cl=cr[cr.length-1].score, co=cr[0].score, cd=(cl-co).toFixed(1);
         return `${cl>=7?'🟢':cl>=4?'🟡':'🔴'} **${n}** \`${scoreBar(cl)}\`  **${cl}/10** ${cd>0?`📈 +${cd}`:cd<0?`📉 ${cd}`:'➡️'}`;
       }).filter(Boolean);
-      if (perChLines.length) e3.addFields({name: 'Per-Channel Latest Scores', value: perChLines.join('\n'), inline: false});
+      if (perChLines.length) e3.addFields({ name: 'Per-Channel Latest Scores', value: perChLines.join('\n'), inline: false });
       e3.setImage(impactLineChart(filtered));
     } else {
       e3.setImage(scoreLineChart(filtered));
     }
 
-    // ── EMBED 4: Sentiment evolution + stacked chart ──
     const e4 = new EmbedBuilder().setColor(0x22c55e).setTitle('💬 Sentiment Evolution')
       .addFields({
         name: 'Change Over Time',
@@ -1101,7 +1088,6 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       })
       .setImage(sentimentStackedChart(filtered));
 
-    // ── EMBED 5: Flagged messages trend + chart ──
     const e5 = new EmbedBuilder().setColor(0xef4444).setTitle('🚩 Flagged Messages Trend')
       .addFields({
         name: 'Summary',
@@ -1110,30 +1096,28 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       })
       .setImage(flaggedLineChart(filtered));
 
-    // ── EMBED 6: Behavior Probability + Predictions + Recommendations ──
     const predLines = [];
     if (filtered.length >= 3) {
       const ra = filtered.slice(-3).reduce((s,r)=>s+r.score,0)/3;
       const oa = filtered.slice(0,-3).reduce((s,r)=>s+r.score,0)/Math.max(filtered.length-3,1);
       const m  = ra-oa;
       if (m >= 1)        predLines.push(`📈 **Accelerating upward** — community energy is building. Expect continued improvement.`);
-      else if (m >= 0)  predLines.push(`🟢 **Positive momentum** — health is stable and likely to improve.`);
-      else if (m >= -1) predLines.push(`🟡 **Slight downward drift** — a good moment to reinvigorate engagement with a community event or spotlight.`);
+      else if (m >= 0)   predLines.push(`🟢 **Positive momentum** — health is stable and likely to improve.`);
+      else if (m >= -1)  predLines.push(`🟡 **Slight downward drift** — a good moment to reinvigorate engagement with a community event or spotlight.`);
       else               predLines.push(`🔴 **Declining momentum** — investing in member recognition and shared goals now can shift this trend.`);
     }
-    if (uDelta > 5)        predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — consider highlighting your most positive members to reset the tone.`);
-    else if (uDelta < -5)  predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — your community norms are strengthening.`);
+    if (uDelta > 5)       predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — consider highlighting your most positive members to reset the tone.`);
+    else if (uDelta < -5) predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — your community norms are strengthening.`);
     if (lFlag > fFlag*1.5 && lFlag > 2) predLines.push(`🚨 **Flagged messages spiking** — this is a signal to double down on celebrating what makes your community great.`);
-    else if (lFlag === 0)  predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
+    else if (lFlag === 0) predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
 
-    // Positive psychology recommendations
     const recLines = [];
-    if (diff < -0.5)      recLines.push(`💡 Score dipped — create a "community highlight" post celebrating your most positive recent conversations.`);
-    else if (diff > 0.5)  recLines.push(`🌟 Score is rising — keep the momentum by publicly recognizing the members who contribute most positively.`);
-    else                   recLines.push(`🎯 Stable community — try a "spotlight of the week" feature to proactively reinforce the positive tone.`);
+    if (diff < -0.5)     recLines.push(`💡 Score dipped — create a "community highlight" post celebrating your most positive recent conversations.`);
+    else if (diff > 0.5) recLines.push(`🌟 Score is rising — keep the momentum by publicly recognizing the members who contribute most positively.`);
+    else                  recLines.push(`🎯 Stable community — try a "spotlight of the week" feature to proactively reinforce the positive tone.`);
 
-    if (fLast >= 70)       recLines.push(`🏆 **${fLast}% friendly** — your community has a strong foundation. Channel this energy into a shared goal or community challenge.`);
-    else if (fLast >= 50)  recLines.push(`🌱 Build on the **${fLast}% friendly** baseline by creating more opportunities for members to connect over shared interests.`);
+    if (fLast >= 70)      recLines.push(`🏆 **${fLast}% friendly** — your community has a strong foundation. Channel this energy into a shared goal or community challenge.`);
+    else if (fLast >= 50) recLines.push(`🌱 Build on the **${fLast}% friendly** baseline by creating more opportunities for members to connect over shared interests.`);
     else                   recLines.push(`❤️ Focus on building **belonging** — small acts like welcoming new members publicly can shift community culture over time.`);
 
     if (toxEntries.length > 0) {
@@ -1150,22 +1134,20 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     }
 
     const e6 = new EmbedBuilder().setColor(0x6366f1).setTitle('🔮 Behavior Forecast & Recommendations');
-
     if (prob) {
       const probText =
         `${prob.improveTrend} **${prob.improveChance}%** probability community improves\n` +
         `${prob.worsenTrend} **${prob.worsenChance}%** probability toxicity increases\n\n` +
         `${prob.confidenceEmoji} **Confidence: ${prob.confidence}** (based on ${filtered.length} reports)\n\n` +
         `**Why:**\n${prob.factors.map(f=>`• ${f}`).join('\n')}`;
-      e6.addFields({name: '📊 Probability Forecast', value: probText, inline: false});
+      e6.addFields({ name: '📊 Probability Forecast', value: probText, inline: false });
     } else {
-      e6.addFields({name: '📊 Probability Forecast', value: 'Run at least 2 reports to see behavior probability forecasts.', inline: false});
+      e6.addFields({ name: '📊 Probability Forecast', value: 'Run at least 2 reports to see behavior probability forecasts.', inline: false });
     }
+    if (predLines.length) e6.addFields({ name: '🔭 Predictions', value: predLines.join('\n'), inline: false });
+    e6.addFields({ name: '💡 Positive Psychology Recommendations', value: recLines.join('\n'), inline: false });
 
-    if (predLines.length) e6.addFields({name: '🔭 Predictions', value: predLines.join('\n'), inline: false});
-    e6.addFields({name: '💡 Positive Psychology Recommendations', value: recLines.join('\n'), inline: false});
-
-    await interaction.editReply({embeds: [e1, e2, e3, e4, e5, e6]});
+    await interaction.editReply({ embeds: [e1, e2, e3, e4, e5, e6] });
 
   } catch (err) {
     console.error('Progress error:', err);
@@ -1178,42 +1160,43 @@ async function handleProgressCommand(interaction, range, filterChannels) {
 // ============================================================
 
 async function handleAdminCommand(interaction) {
-  if (interaction.user.id !== CONFIG.OWNER_ID) return interaction.reply({content:'Owner only.',ephemeral:true});
-  const action=interaction.options.getString('action'), sid=interaction.options.getString('server_id'), extra=interaction.options.getInteger('reports')||5;
-  if (!/^\d{17,19}$/.test(sid)) return interaction.reply({content:'Invalid server ID.',ephemeral:true});
-  await interaction.deferReply({ephemeral:true});
+  if (interaction.user.id !== CONFIG.OWNER_ID) return interaction.reply({ content: 'Owner only.', flags: MessageFlags.Ephemeral });
+  const action = interaction.options.getString('action');
+  const sid    = interaction.options.getString('server_id');
+  const extra  = interaction.options.getInteger('reports') || 5;
+  if (!/^\d{17,19}$/.test(sid)) return interaction.reply({ content: 'Invalid server ID.', flags: MessageFlags.Ephemeral });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   console.log(`ADMIN: ${action} on ${sid} by ${interaction.user.tag}`);
   try {
     if (action === 'tester') {
       const exp = new Date(Date.now()+14*86400000);
-      await supabase.from('testers').upsert({server_id:sid, approved_at:new Date().toISOString(), expires_at:exp.toISOString()});
+      await supabase.from('testers').upsert({ server_id: sid, approved_at: new Date().toISOString(), expires_at: exp.toISOString() });
       return interaction.editReply(`Tester approved — \`${sid}\`\nExpires: **${exp.toDateString()}**\nUnlimited access unlocked.`);
     }
     if (action === 'tester_off') {
-      await supabase.from('testers').delete().eq('server_id',sid);
+      await supabase.from('testers').delete().eq('server_id', sid);
       return interaction.editReply(`Tester revoked — \`${sid}\` back to Free tier.`);
     }
     if (action === 'test') {
-      const {data} = await supabase.from('usage').select('free_bonus').eq('server_id',sid).single();
-      if (data) await supabase.from('usage').update({free_bonus:(data.free_bonus||0)+extra}).eq('server_id',sid);
-      else await supabase.from('usage').insert({server_id:sid,reports_used:0,free_bonus:extra,month_start:new Date().toISOString()});
+      const { data } = await supabase.from('usage').select('free_bonus').eq('server_id', sid).single();
+      if (data) await supabase.from('usage').update({ free_bonus: (data.free_bonus||0)+extra }).eq('server_id', sid);
+      else await supabase.from('usage').insert({ server_id: sid, reports_used: 0, free_bonus: extra, month_start: new Date().toISOString() });
       return interaction.editReply(`Added ${extra} extra reports to \`${sid}\`.`);
     }
     if (action === 'pro') {
-      const exp=new Date(); exp.setDate(exp.getDate()+30);
-      await supabase.from('paid_servers').upsert({server_id:sid,activated_at:new Date().toISOString(),expires_at:exp.toISOString()});
+      const exp = new Date(); exp.setDate(exp.getDate()+30);
+      await supabase.from('paid_servers').upsert({ server_id: sid, activated_at: new Date().toISOString(), expires_at: exp.toISOString() });
       return interaction.editReply(`Pro activated — \`${sid}\` expires **${exp.toDateString()}**.`);
     }
     if (action === 'pro_off') {
-      await supabase.from('paid_servers').delete().eq('server_id',sid);
+      await supabase.from('paid_servers').delete().eq('server_id', sid);
       return interaction.editReply(`Pro deactivated — \`${sid}\` back to Free tier.`);
     }
-  } catch (e) { console.error('Admin error:',e); return interaction.editReply(`Error: ${e.message}`); }
+  } catch (e) { console.error('Admin error:', e); return interaction.editReply(`Error: ${e.message}`); }
 }
 
 // ============================================================
-// HTTP + START
+// LOGIN
 // ============================================================
 
-http.createServer((req, res) => res.end('Vibe Check Bot is running')).listen(process.env.PORT || 3000);
 client.login(process.env.DISCORD_TOKEN);
