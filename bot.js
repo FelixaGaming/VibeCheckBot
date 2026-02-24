@@ -1,30 +1,14 @@
 const http = require('http');
-// ============================================================
-// VIBE CHECK BOT
-// ============================================================
-//
-// Features:
-// - /vibe command — analyze 1 to 5 channels in one report
-// - /vibe-progress — track community health over time
-// - OpenAI GPT-4o-mini analysis
-// - Sensitivity levels: Low / Medium / High
-// - Visibility: Private / Public
-// - Custom timeframes and message counts
-// - Supabase report storage
-// - Email reports via Resend
-// - Stripe paywall (5 free reports, then Pro)
-// - Rate limiting and cooldowns
-// - Welcome message on server join
-// - HTTP server to keep Railway alive
-//
-// ============================================================
+// ============================================
+// VIBECHECK DISCORD BOT - WITH RESEARCH LOGGING
+// ============================================
 
 require('dotenv').config();
-const {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
+const { 
+  Client, 
+  GatewayIntentBits, 
+  SlashCommandBuilder, 
+  REST, 
   Routes,
   EmbedBuilder,
   ActionRowBuilder,
@@ -41,9 +25,9 @@ const { Resend } = require('resend');
 const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 
-// ============================================================
+// ============================================
 // CONFIGURATION
-// ============================================================
+// ============================================
 
 const CONFIG = {
   // Plan limits
@@ -51,1883 +35,1916 @@ const CONFIG = {
   PRO_REPORTS_PER_MONTH: 30,
   FREE_MAX_MESSAGES: 500,
   PRO_MAX_MESSAGES: 1000,
-  FREE_MAX_CHANNELS: 1,
-  PRO_MAX_CHANNELS: 5,
-
+  FREE_PROGRESS_REPORTS: 1,
+  PRO_PROGRESS_REPORTS: 4,
+  
   // OpenAI safety limits
   MAX_OPENAI_CHARS: 30000,
-  MAX_OPENAI_MESSAGES_PER_CHANNEL: 200,
-
-  // Stripe payment links
+  MAX_OPENAI_MESSAGES: 200,
+  
+  // Payment links
   STRIPE_MONTHLY_LINK: 'https://buy.stripe.com/fZu28k00n5s92Oqf4z4ow01',
   STRIPE_YEARLY_LINK: 'https://buy.stripe.com/bJebIUbJ56wd4Wye0v4ow03',
-
+  YEARLY_ENABLED: true,
+  
   // Contact
   CONTACT_EMAIL: 'play@felixagaming.com',
   REPORT_EMAIL: 'play@felixagaming.com',
   OWNER_ID: '1185219817913991220',
-
-  // Stripe
-  YEARLY_ENABLED: true,
-
+  
   // Rate limiting
   COOLDOWN_SECONDS: 15,
   SERVER_THROTTLE_PER_MINUTE: 10,
-
+  
   // Timeouts
   PENDING_COMMAND_TIMEOUT: 300000,
-
+  
   // OpenAI cost tracking (GPT-4o-mini pricing)
   COST_PER_1M_INPUT_TOKENS: 0.15,
   COST_PER_1M_OUTPUT_TOKENS: 0.60
 };
 
-// ============================================================
+// ============================================
 // SENSITIVITY PROMPTS
-// ============================================================
+// ============================================
 
 const SENSITIVITY_PROMPTS = {
   low: `SENSITIVITY: LOW (Adult/Gaming communities - CoD, GTA, etc.)
-- Casual trash talk and banter is NORMAL — mark as neutral, NOT unfriendly
-- Only flag: death threats, slurs (racial/homophobic), doxxing, severe harassment
-- "get rekt", "you suck", "trash player" = neutral in gaming context
-- Profanity alone is NOT unfriendly
-- Reserve "unfriendly" for genuinely toxic behavior that would harm the community`,
 
-  medium: `SENSITIVITY: MEDIUM (General communities)
-- Flag: insults, harassment, bullying, hate speech, threats, repeated negativity
-- Mild disagreement or criticism = neutral
-- "Your idea is bad" = neutral. "You are worthless" = unfriendly
-- Flag xenophobia, racism, sexism, homophobia
-- Flag persistent harassment ("I'll keep tagging you until you leave")
-- Constructive criticism is fine, personal attacks are not`,
+WHAT TO FLAG:
+- Direct personal attacks and targeted insults at specific people
+- Threats of violence or harm
+- Harassment and stalking behavior
+- Racism, xenophobia, homophobia, slurs
+- Doxxing or sharing personal information
+- Sexual harassment
 
-  high: `SENSITIVITY: HIGH (Kids / Family / Education)
-- Flag: any profanity, mild insults, rude dismissals, negative tone
-- "That's dumb" = unfriendly. "I disagree" = neutral
-- Anything that would make a child feel unsafe or unwelcome = unfriendly
-- Very strict — when in doubt, mark as unfriendly`
+WHAT IS ACCEPTABLE (do NOT flag):
+- General swearing/profanity not directed at anyone ("fuck this game", "damn it")
+- Trash talk that's clearly playful or gaming-related ("you suck", "get rekt")
+- Competitive banter without personal attacks
+- Mild frustration or venting
+- Dark humor (unless targeting protected groups)
+
+SCORING:
+- Only score below 5 if there are real threats, harassment, or discrimination
+- General profanity should NOT lower the score significantly`,
+
+  medium: `SENSITIVITY: MEDIUM (General communities - default)
+
+WHAT TO FLAG:
+- All personal insults and attacks
+- Threats of any kind
+- Harassment and bullying
+- Racism, xenophobia, homophobia
+- Profanity directed at people ("you bitch", "fuck you")
+- Passive-aggressive attacks and put-downs
+- Dismissive/demeaning comments
+
+WHAT IS ACCEPTABLE (do NOT flag):
+- Mild profanity not directed at anyone
+- Constructive criticism
+- Polite disagreements
+- Simple requests even if direct
+
+SCORING:
+- Score below 5 if threats, discrimination, or significant harassment exists
+- Score 5-7 if there's notable negativity or directed profanity`,
+
+  high: `SENSITIVITY: HIGH (Family/Kids communities - Minecraft, Roblox, etc.)
+
+WHAT TO FLAG - BE VERY STRICT:
+- ANY profanity or swear words (even mild: "damn", "hell", "crap")
+- ANY insults (even mild: "you're bad", "that's stupid")
+- ANY negativity or rudeness
+- ANY bullying or exclusion ("nobody likes you", "go away")
+- ANY inappropriate topics for children
+- Sarcasm meant to hurt
+- Peer pressure or manipulation
+- Anything that could make a child feel bad
+
+WHAT IS ACCEPTABLE:
+- Positive, encouraging messages only
+- Helpful advice given kindly
+- Friendly conversation
+
+SCORING:
+- Score below 7 if ANY profanity exists
+- Score below 5 if ANY bullying, insults, or meanness exists
+- Only score 8+ if conversation is genuinely positive and supportive`
 };
 
-// ============================================================
-// OPENAI + RESEND + SUPABASE SETUP
-// ============================================================
+// ============================================
+// RATE LIMITING & PENDING COMMANDS
+// ============================================
 
-// ============================================================
+const cooldowns = new Map();
+const serverThrottles = new Map();
+const pendingProgressCommands = new Map();
+
+function setPendingCommand(map, key, value) {
+  const existing = map.get(key);
+  if (existing?.timeout) clearTimeout(existing.timeout);
+  
+  const timeout = setTimeout(() => {
+    map.delete(key);
+    console.log(`🧹 Pending command expired for user ${key}`);
+  }, CONFIG.PENDING_COMMAND_TIMEOUT);
+  
+  const data = { ...value, timeout, createdAt: Date.now() };
+  map.set(key, data);
+  console.log(`📝 Stored pending command for user ${key}`);
+}
+
+function peekPendingCommand(map, key) {
+  const pending = map.get(key);
+  if (!pending) return null;
+  const { timeout, createdAt, ...data } = pending;
+  return data;
+}
+
+function consumePendingCommand(map, key) {
+  console.log(`🔍 Consuming pending command for user ${key}`);
+  const pending = map.get(key);
+  if (!pending) {
+    console.log(`❌ No pending command found for user ${key}`);
+    return null;
+  }
+  
+  if (pending.timeout) {
+    clearTimeout(pending.timeout);
+  }
+  
+  const { timeout, createdAt, ...data } = pending;
+  map.delete(key);
+  console.log(`✅ Consumed pending command for user ${key}`);
+  return data;
+}
+
+function isOnCooldown(serverId, userId) {
+  const key = `${serverId}_${userId}`;
+  if (!cooldowns.has(key)) return false;
+  return (Date.now() - cooldowns.get(key)) < (CONFIG.COOLDOWN_SECONDS * 1000);
+}
+
+function getCooldownRemaining(serverId, userId) {
+  const key = `${serverId}_${userId}`;
+  if (!cooldowns.has(key)) return 0;
+  return Math.ceil((CONFIG.COOLDOWN_SECONDS * 1000 - (Date.now() - cooldowns.get(key))) / 1000);
+}
+
+function setCooldown(serverId, userId) {
+  const key = `${serverId}_${userId}`;
+  cooldowns.set(key, Date.now());
+}
+
+function isServerThrottled(serverId) {
+  const now = Date.now();
+  const minuteAgo = now - 60000;
+  
+  if (!serverThrottles.has(serverId)) {
+    serverThrottles.set(serverId, []);
+  }
+  
+  const requests = serverThrottles.get(serverId).filter(t => t > minuteAgo);
+  serverThrottles.set(serverId, requests);
+  
+  return requests.length >= CONFIG.SERVER_THROTTLE_PER_MINUTE;
+}
+
+function recordServerRequest(serverId) {
+  if (!serverThrottles.has(serverId)) {
+    serverThrottles.set(serverId, []);
+  }
+  serverThrottles.get(serverId).push(Date.now());
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+function clamp(num, min, max) {
+  return Math.min(Math.max(num, min), max);
+}
+
+function sanitizeMessage(msg) {
+  if (!msg || typeof msg !== 'string') return '';
+  return msg
+    .replace(/```/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .slice(0, 500);
+}
+
+function safePercentage(value, total) {
+  if (!total || total === 0) return 0;
+  return Math.round((value / total) * 100);
+}
+
+function createSubscriptionButtons(options = {}) {
+  const { 
+    monthlyLabel = '⚡ Monthly · $9.99', 
+    yearlyLabel = '💎 Yearly · $99 (Save 17%)',
+    upgradeOnly = false
+  } = options;
+  
+  const buttons = [];
+  
+  if (!upgradeOnly) {
+    buttons.push(
+      new ButtonBuilder()
+        .setLabel(monthlyLabel)
+        .setStyle(ButtonStyle.Link)
+        .setURL(CONFIG.STRIPE_MONTHLY_LINK)
+    );
+  }
+  
+  if (CONFIG.YEARLY_ENABLED) {
+    buttons.push(
+      new ButtonBuilder()
+        .setLabel(yearlyLabel)
+        .setStyle(ButtonStyle.Link)
+        .setURL(CONFIG.STRIPE_YEARLY_LINK)
+    );
+  }
+  
+  return new ActionRowBuilder().addComponents(buttons);
+}
+
+// ============================================
+// RESEARCH LOGGING (Privacy-Safe)
+// ============================================
+
+function hashForResearch(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16);
+}
+
+function calculateCost(inputTokens, outputTokens) {
+  const inputCost = (inputTokens / 1_000_000) * CONFIG.COST_PER_1M_INPUT_TOKENS;
+  const outputCost = (outputTokens / 1_000_000) * CONFIG.COST_PER_1M_OUTPUT_TOKENS;
+  return inputCost + outputCost;
+}
+
+async function logResearchData(data) {
+  try {
+    const { error } = await supabase.from('research_logs').insert({
+      server_id_hash: hashForResearch(data.serverId),
+      user_id_hash: hashForResearch(data.userId),
+      channel_id_hash: hashForResearch(data.channelId),
+      messages_analyzed: data.messagesAnalyzed,
+      timeframe: data.timeframe,
+      sensitivity: data.sensitivity,
+      visibility: data.visibility,
+      is_pro: data.isPro,
+      score: data.score,
+      friendly: data.friendly,
+      neutral: data.neutral,
+      unfriendly: data.unfriendly,
+      flagged_count: data.flaggedCount,
+      toxicity_types: data.toxicityTypes,
+      processing_time_ms: data.processingTimeMs,
+      input_tokens: data.inputTokens,
+      output_tokens: data.outputTokens,
+      cost_usd: data.costUsd,
+      success: data.success,
+      error_message: data.errorMessage || null
+    });
+    
+    if (error) {
+      console.error('Research log error:', error);
+    } else {
+      console.log(`📊 Research logged: ${data.messagesAnalyzed} msgs, $${data.costUsd.toFixed(6)}`);
+    }
+  } catch (err) {
+    console.error('Research logging failed:', err);
+  }
+}
+
+// ============================================
+// API SETUP
+// ============================================
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const resend = new Resend(process.env.RESEND_API_KEY);
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+    detectSessionInUrl: false
+  }
+});
+
+// ============================================
+// SUPABASE FUNCTIONS
+// ============================================
+
+async function getUsage(serverId) {
+  try {
+    const { data, error } = await supabase.from('usage').select('*').eq('server_id', serverId).single();
+    if (error || !data) {
+      const { data: newData } = await supabase.from('usage').insert({ server_id: serverId, reports_used: 0, progress_used: 0 }).select().single();
+      return newData || { reports_used: 0, progress_used: 0, month_start: new Date().toISOString() };
+    }
+    return data;
+  } catch (error) {
+    console.error('getUsage error:', error);
+    return { reports_used: 0, progress_used: 0, month_start: new Date().toISOString() };
+  }
+}
+
+async function getProgressUsage(serverId) {
+  try {
+    const usage = await getUsage(serverId);
+    return usage.progress_used || 0;
+  } catch (error) {
+    return 0;
+  }
+}
+
+async function useProgressReport(serverId) {
+  try {
+    const usage = await getUsage(serverId);
+    const newCount = (usage.progress_used || 0) + 1;
+    await supabase.from('usage').update({ progress_used: newCount }).eq('server_id', serverId);
+    return newCount;
+  } catch (error) {
+    console.error('useProgressReport error:', error);
+    return 0;
+  }
+}
+
+async function hasProgressAccess(serverId) {
+  try {
+    const { data } = await supabase.from('progress_access').select('*').eq('server_id', serverId).single();
+    return !!data;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function canUseProgressReport(serverId, userId = null) {
+  if (userId === CONFIG.OWNER_ID) return true;
+  const hasPaid = await hasProgressAccess(serverId);
+  if (hasPaid) return true;
+  const approved = await isApproved(serverId);
+  if (approved) {
+    const used = await getProgressUsage(serverId);
+    return used < CONFIG.PRO_PROGRESS_REPORTS;
+  }
+  const used = await getProgressUsage(serverId);
+  return used < CONFIG.FREE_PROGRESS_REPORTS;
+}
+
+async function getProgressReportsRemaining(serverId, userId = null) {
+  if (userId === CONFIG.OWNER_ID) return 999;
+  const hasPaid = await hasProgressAccess(serverId);
+  if (hasPaid) return 999;
+  const approved = await isApproved(serverId);
+  const used = await getProgressUsage(serverId);
+  if (approved) return Math.max(0, CONFIG.PRO_PROGRESS_REPORTS - used);
+  return Math.max(0, CONFIG.FREE_PROGRESS_REPORTS - used);
+}
+
+async function isApproved(serverId) {
+  try {
+    const { data, error } = await supabase.from('approved_servers').select('*').eq('server_id', serverId).single();
+    if (error || !data) return false;
+    if (data.expires_at) {
+      const expiresAt = new Date(data.expires_at);
+      if (expiresAt <= new Date()) return false;
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function getApprovedServer(serverId) {
+  try {
+    const { data } = await supabase.from('approved_servers').select('*').eq('server_id', serverId).single();
+    return data;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function getApprovalRequest(serverId) {
+  try {
+    const { data } = await supabase.from('approval_requests').select('*').eq('server_id', serverId).order('requested_at', { ascending: false }).limit(1).single();
+    return data;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function createApprovalRequest(serverId, serverName, requestedBy) {
+  try {
+    const { data, error } = await supabase.from('approval_requests').insert({ server_id: serverId, server_name: serverName, requested_by: requestedBy, status: 'pending' }).select().single();
+    if (error) console.error('Approval request error:', error);
+    return data;
+  } catch (error) {
+    console.error('createApprovalRequest error:', error);
+    return null;
+  }
+}
+
+async function updateApprovalStatus(serverId, status) {
+  try {
+    await supabase.from('approval_requests').update({ status }).eq('server_id', serverId).eq('status', 'pending');
+  } catch (error) {
+    console.error('updateApprovalStatus error:', error);
+  }
+}
+
+async function approveServer(serverId, serverName, days = 30) {
+  try {
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + days);
+    await supabase.from('approved_servers').upsert({ 
+      server_id: serverId, 
+      server_name: serverName, 
+      reports_allowed: CONFIG.PRO_REPORTS_PER_MONTH,
+      expires_at: expiresAt.toISOString()
+    });
+    await updateApprovalStatus(serverId, 'approved');
+    await supabase.from('usage').upsert({ 
+      server_id: serverId, 
+      reports_used: 0, 
+      progress_used: 0, 
+      month_start: new Date().toISOString() 
+    });
+    return expiresAt;
+  } catch (error) {
+    console.error('approveServer error:', error);
+    return null;
+  }
+}
+
+async function renewSubscription(serverId, days = 30) {
+  try {
+    const current = await getApprovedServer(serverId);
+    if (!current) return null;
+    const startDate = current.expires_at && new Date(current.expires_at) > new Date() 
+      ? new Date(current.expires_at) : new Date();
+    const expiresAt = new Date(startDate);
+    expiresAt.setDate(expiresAt.getDate() + days);
+    await supabase.from('approved_servers').update({ expires_at: expiresAt.toISOString() }).eq('server_id', serverId);
+    await supabase.from('usage').upsert({ 
+      server_id: serverId, 
+      reports_used: 0, 
+      progress_used: 0, 
+      month_start: new Date().toISOString() 
+    });
+    return expiresAt;
+  } catch (error) {
+    console.error('renewSubscription error:', error);
+    return null;
+  }
+}
+
+async function getSubscriptionStatus(serverId) {
+  try {
+    const approved = await getApprovedServer(serverId);
+    if (!approved) return { active: false, expired: false, daysLeft: 0 };
+    if (!approved.expires_at) return { active: true, expired: false, daysLeft: 999, expiresAt: null };
+    const expiresAt = new Date(approved.expires_at);
+    const now = new Date();
+    const daysLeft = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+    return { active: daysLeft > 0, expired: daysLeft <= 0, daysLeft: Math.max(0, daysLeft), expiresAt: expiresAt };
+  } catch (error) {
+    return { active: false, expired: true, daysLeft: 0 };
+  }
+}
+
+async function canUseBot(serverId, userId = null) {
+  try {
+    if (userId === CONFIG.OWNER_ID) return true;
+    const approved = await isApproved(serverId);
+    const usage = await getUsage(serverId);
+    if (approved) {
+      const approvedData = await getApprovedServer(serverId);
+      const monthStart = new Date(usage.month_start);
+      const daysSinceStart = (new Date() - monthStart) / (1000 * 60 * 60 * 24);
+      if (daysSinceStart >= 30) {
+        await supabase.from('usage').update({ reports_used: 0, progress_used: 0, month_start: new Date().toISOString() }).eq('server_id', serverId);
+        return true;
+      }
+      return usage.reports_used < (approvedData?.reports_allowed || CONFIG.PRO_REPORTS_PER_MONTH);
+    }
+    return usage.reports_used < CONFIG.FREE_REPORTS;
+  } catch (error) {
+    console.error('canUseBot error:', error);
+    return true;
+  }
+}
+
+async function getReportsRemaining(serverId, userId = null) {
+  try {
+    if (userId === CONFIG.OWNER_ID) return 999;
+    const approved = await isApproved(serverId);
+    const usage = await getUsage(serverId);
+    if (approved) {
+      const approvedData = await getApprovedServer(serverId);
+      return Math.max(0, (approvedData?.reports_allowed || CONFIG.PRO_REPORTS_PER_MONTH) - usage.reports_used);
+    }
+    return Math.max(0, CONFIG.FREE_REPORTS - usage.reports_used);
+  } catch (error) {
+    return 0;
+  }
+}
+
+async function useReport(serverId) {
+  try {
+    const usage = await getUsage(serverId);
+    const newCount = usage.reports_used + 1;
+    await supabase.from('usage').update({ reports_used: newCount }).eq('server_id', serverId);
+    return newCount;
+  } catch (error) {
+    console.error('useReport error:', error);
+    return 0;
+  }
+}
+
+async function getTotalReports(serverId, channelName = null) {
+  try {
+    let query = supabase.from('reports').select('*', { count: 'exact', head: true }).eq('server_id', serverId);
+    if (channelName) query = query.eq('channel_name', channelName);
+    const { count } = await query;
+    return count || 0;
+  } catch (error) {
+    return 0;
+  }
+}
+
+async function saveReport(reportData) {
+  try {
+    const { error } = await supabase.from('reports').insert({
+      server_id: reportData.serverId,
+      channel_name: reportData.channelName,
+      score: reportData.score,
+      friendly: reportData.sentiment.friendly,
+      neutral: reportData.sentiment.neutral,
+      unfriendly: reportData.sentiment.unfriendly,
+      flagged_count: reportData.flaggedMessages ? reportData.flaggedMessages.length : 0,
+      sensitivity: reportData.sensitivity,
+      timeframe: reportData.timeframe,
+      toxicity_types: reportData.toxicityTypes ? JSON.stringify(reportData.toxicityTypes) : null
+    });
+    if (error) console.error('Supabase save error:', error);
+  } catch (error) {
+    console.error('saveReport error:', error);
+  }
+}
+
+async function getReportHistory(serverId, channelName = null, limit = 10, daysBack = null) {
+  try {
+    let query = supabase.from('reports').select('*').eq('server_id', serverId);
+    if (channelName) query = query.eq('channel_name', channelName);
+    if (daysBack) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - daysBack);
+      query = query.gte('created_at', cutoff.toISOString());
+    }
+    const { data, error } = await query.order('created_at', { ascending: false }).limit(limit);
+    if (error) { console.error('Supabase fetch error:', error); return []; }
+    return data || [];
+  } catch (error) {
+    console.error('getReportHistory error:', error);
+    return [];
+  }
+}
+
+// ============================================
+// CHART & EMAIL
+// ============================================
+
+function generateChartUrl(reports) {
+  if (!reports || reports.length === 0) return null;
+  const chronological = [...reports].reverse();
+  const labels = chronological.map(r => {
+    try { return new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+    catch { return 'N/A'; }
+  });
+  const scores = chronological.map(r => clamp(parseFloat(r.score) || 0, 0, 10));
+  const flagged = chronological.map(r => Math.max(0, r.flagged_count || 0));
+  const chartConfig = {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Score', data: scores, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', fill: true, tension: 0.3, yAxisID: 'y' },
+        { label: 'Flagged', data: flagged, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: false, tension: 0.3, yAxisID: 'y1' }
+      ]
+    },
+    options: {
+      scales: {
+        y: { type: 'linear', position: 'left', min: 0, max: 10, title: { display: true, text: 'Score' } },
+        y1: { type: 'linear', position: 'right', min: 0, title: { display: true, text: 'Flagged' }, grid: { drawOnChartArea: false } }
+      },
+      plugins: { title: { display: true, text: 'Community Health Trend' } }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=500&h=300&bkg=white`;
+}
+
+async function sendFreeTrialStartEmail(serverName, serverId, userName, userId) {
+  try {
+    const { error } = await resend.emails.send({
+      from: 'VibeCheck <noreply@felixagaming.com>',
+      to: CONFIG.REPORT_EMAIL,
+      subject: `🆕 New Free Trial Started: ${serverName}`,
+      html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;"><div style="background: linear-gradient(135deg, #3b82f6, #1d4ed8); padding: 20px; text-align: center;"><h1 style="color: white; margin: 0;">🆕 New Free Trial</h1></div><div style="padding: 20px; background: #f9fafb;"><h2 style="margin-top: 0;">A new server started their free trial!</h2><p><strong>Server:</strong> ${serverName}</p><p><strong>Server ID:</strong> ${serverId}</p><p><strong>Free reports:</strong> 5</p></div><div style="padding: 20px; background: #eff6ff;"><p style="margin: 0;">💡 This is report #1 of 5 free reports.</p></div></div>`
+    });
+    if (error) console.error('Free trial email error:', error);
+  } catch (error) {
+    console.error('sendFreeTrialStartEmail error:', error);
+  }
+}
+
+async function sendTrialEndedEmail(serverName, serverId, userName) {
+  try {
+    const { error } = await resend.emails.send({
+      from: 'VibeCheck <noreply@felixagaming.com>',
+      to: CONFIG.REPORT_EMAIL,
+      subject: `🔔 Trial Ended: ${serverName}`,
+      html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;"><div style="background: linear-gradient(135deg, #f59e0b, #d97706); padding: 20px; text-align: center;"><h1 style="color: white; margin: 0;">🔔 Trial Ended</h1></div><div style="padding: 20px; background: #f9fafb;"><h2 style="margin-top: 0;">A server just finished their free trial!</h2><p><strong>Server:</strong> ${serverName}</p><p><strong>Server ID:</strong> ${serverId}</p><p><strong>Last used by:</strong> ${userName}</p><p><strong>Reports used:</strong> 5/5</p></div><div style="padding: 20px; background: #fef3c7;"><p style="margin: 0;">💰 They've been shown the Stripe link.</p><p style="margin-top: 10px;"><strong>To approve:</strong> <code>/vibe-admin approve ${serverId}</code></p></div></div>`
+    });
+    if (error) console.error('Trial ended email error:', error);
+  } catch (error) {
+    console.error('sendTrialEndedEmail error:', error);
+  }
+}
+
+async function sendProgressReportEmail(serverName, serverId, channelName, reports, requestedBy) {
+  try {
+    if (!reports || reports.length < 2) return;
+    const chronological = [...reports].reverse();
+    const firstScore = clamp(parseFloat(chronological[0].score) || 0, 0, 10);
+    const lastScore = clamp(parseFloat(chronological[chronological.length - 1].score) || 0, 0, 10);
+    const scoreDiff = (lastScore - firstScore).toFixed(1);
+    const trendEmoji = scoreDiff > 0 ? '📈' : scoreDiff < 0 ? '📉' : '➡️';
+    const firstDate = new Date(chronological[0].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const lastDate = new Date(chronological[chronological.length - 1].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const totalFlagged = chronological.reduce((sum, r) => sum + (r.flagged_count || 0), 0);
+    let scoreColor = '#22c55e';
+    if (scoreDiff < 0) scoreColor = '#ef4444';
+    else if (scoreDiff == 0) scoreColor = '#6b7280';
+    const title = channelName ? `Progress: #${channelName}` : 'Progress Report';
+    const { error } = await resend.emails.send({
+      from: 'VibeCheck <noreply@felixagaming.com>',
+      to: CONFIG.REPORT_EMAIL,
+      subject: `📈 VibeCheck Progress: ${serverName} (${firstScore} → ${lastScore})`,
+      html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;"><div style="background: linear-gradient(135deg, #22c55e, #16a34a); padding: 20px; text-align: center;"><h1 style="color: white; margin: 0;">📈 ${title}</h1></div><div style="background: ${scoreColor}; padding: 15px; text-align: center;"><h2 style="color: white; margin: 0; font-size: 28px;">${trendEmoji} ${firstScore} → ${lastScore} (${scoreDiff > 0 ? '+' : ''}${scoreDiff})</h2></div><div style="padding: 20px; background: #f9fafb;"><p><strong>Server:</strong> ${serverName}</p><p><strong>Server ID:</strong> ${serverId}</p><p><strong>Requested by:</strong> ${requestedBy}</p><p><strong>Reports:</strong> ${reports.length} (${firstDate} - ${lastDate})</p><p><strong>Total Flagged:</strong> ${totalFlagged}</p></div></div>`
+    });
+    if (error) console.error('Progress email error:', error);
+  } catch (error) {
+    console.error('sendProgressReportEmail error:', error);
+  }
+}
+
+async function sendReportEmail(reportData) {
+  try {
+    const { serverName, serverId, channelName, messageCount, score, sentiment, flaggedMessages, toxicityTypes, recommendation, remaining, isPro, sensitivity, timeframe, visibility } = reportData;
+    const flaggedSummary = flaggedMessages?.length > 0
+      ? flaggedMessages.slice(0, 10).map((m, i) => `${i + 1}. ${m.type || 'Unknown'} (severity: ${m.severity || 'N/A'})`).join('<br>')
+      : 'None';
+    const toxicityList = toxicityTypes && Object.keys(toxicityTypes).length > 0
+      ? Object.entries(toxicityTypes).sort((a, b) => b[1] - a[1]).map(([type, count]) => `${type}: ${count}`).join('<br>')
+      : 'None';
+    const sensitivityLabel = { low: '🎮 Low', medium: '⚖️ Medium', high: '👶 High' }[sensitivity] || '⚖️ Medium';
+    const timeframeLabel = { '1h': '1 hour', '24h': '24 hours', '7d': '7 days', '30d': '30 days' }[timeframe] || timeframe;
+    const visibilityLabel = visibility === 'private' ? '🔒 Private' : '📢 Public';
+    const total = (sentiment.friendly || 0) + (sentiment.neutral || 0) + (sentiment.unfriendly || 0);
+    const friendlyPct = safePercentage(sentiment.friendly, total);
+    const neutralPct = safePercentage(sentiment.neutral, total);
+    const unfriendlyPct = safePercentage(sentiment.unfriendly, total);
+    let scoreColor = '#22c55e';
+    if (score < 4) scoreColor = '#ef4444';
+    else if (score < 6) scoreColor = '#f59e0b';
+    const { error } = await resend.emails.send({
+      from: 'VibeCheck <noreply@felixagaming.com>',
+      to: CONFIG.REPORT_EMAIL,
+      subject: `📊 VibeCheck: ${serverName} (${score}/10) - #${channelName}`,
+      html: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;"><div style="background: linear-gradient(135deg, #22c55e, #16a34a); padding: 20px; text-align: center;"><h1 style="color: white; margin: 0;">📊 VibeCheck Report</h1></div><div style="background: ${scoreColor}; padding: 15px; text-align: center;"><h2 style="color: white; margin: 0; font-size: 36px;">${score}/10</h2></div><div style="padding: 20px; background: #f9fafb;"><p><strong>Server ID:</strong> ${serverId}</p><p><strong>Channel:</strong> #${channelName}</p><p><strong>Messages:</strong> ${messageCount}</p><p><strong>Timeframe:</strong> ${timeframeLabel}</p><p><strong>Sensitivity:</strong> ${sensitivityLabel}</p><p><strong>Visibility:</strong> ${visibilityLabel}</p><p><strong>Plan:</strong> ${isPro ? '⚡ Pro' : '🎁 Free'} (${remaining} left)</p></div><div style="padding: 20px;"><h3>Sentiment</h3><p>🟢 ${sentiment.friendly || 0} (${friendlyPct}%) · ⚪ ${sentiment.neutral || 0} (${neutralPct}%) · 🔴 ${sentiment.unfriendly || 0} (${unfriendlyPct}%)</p></div><div style="padding: 20px; background: #fef2f2;"><h3>🚩 Flagged Types (${flaggedMessages?.length || 0})</h3><p>${flaggedSummary}</p></div><div style="padding: 20px;"><h3>Toxicity Types</h3><p>${toxicityList}</p></div><div style="padding: 20px; background: #eff6ff;"><h3>💡 Recommendation</h3><p>${recommendation || 'None'}</p></div></div>`
+    });
+    if (error) console.error('Report email error:', error);
+  } catch (error) {
+    console.error('sendReportEmail error:', error);
+  }
+}
+
+// ============================================
+// OPENAI ANALYSIS
+// ============================================
+
+async function analyzeMessages(messages, channelName, timeframe, sensitivity) {
+  let sanitizedMessages = messages.map(m => sanitizeMessage(m)).filter(m => m.length > 0);
+  
+  if (sanitizedMessages.length > CONFIG.MAX_OPENAI_MESSAGES) {
+    console.log(`⚠️ Sampling: ${sanitizedMessages.length} messages exceeds limit of ${CONFIG.MAX_OPENAI_MESSAGES}`);
+    const step = Math.ceil(sanitizedMessages.length / CONFIG.MAX_OPENAI_MESSAGES);
+    sanitizedMessages = sanitizedMessages.filter((_, i) => i % step === 0).slice(0, CONFIG.MAX_OPENAI_MESSAGES);
+    console.log(`   Sampled down to ${sanitizedMessages.length} messages`);
+  }
+  
+  let totalChars = sanitizedMessages.reduce((sum, m) => sum + m.length, 0);
+  if (totalChars > CONFIG.MAX_OPENAI_CHARS) {
+    console.log(`⚠️ Truncating: ${totalChars} chars exceeds limit of ${CONFIG.MAX_OPENAI_CHARS}`);
+    const ratio = CONFIG.MAX_OPENAI_CHARS / totalChars;
+    const maxPerMessage = Math.floor(500 * ratio);
+    sanitizedMessages = sanitizedMessages.map(m => m.slice(0, maxPerMessage));
+    totalChars = sanitizedMessages.reduce((sum, m) => sum + m.length, 0);
+    console.log(`   Truncated to ${totalChars} chars`);
+  }
+  
+  const messageCount = sanitizedMessages.length;
+  const sensitivityPrompt = SENSITIVITY_PROMPTS[sensitivity] || SENSITIVITY_PROMPTS.medium;
+  
+  const prompt = `You are VibeCheck, a community behavior analyzer for Discord.
+
+Analyze these ${messageCount} messages from #${channelName} (${timeframe} timeframe).
+
+${sensitivityPrompt}
+
+MESSAGES TO ANALYZE:
+${sanitizedMessages.map((m, i) => `[${i + 1}] ${m}`).join('\n')}
+
+Return ONLY valid JSON (no markdown, no explanation) in this exact format:
+{
+  "friendlinessScore": 7.2,
+  "sentiment": { "friendly": 5, "neutral": 3, "unfriendly": 2 },
+  "flaggedMessages": [{ "text": "exact quote", "type": "Harassment", "severity": 9.5 }],
+  "toxicityTypes": { "Insults": 2, "Harassment": 1 },
+  "recommendation": "One sentence of advice."
+}
+
+RULES:
+1. friendly + neutral + unfriendly MUST equal ${messageCount}
+2. Flag ALL messages violating guidelines, sort by severity
+3. Severity: 10=death threats, 9=racism/threats, 8=insults, 7=bullying, 6=mild negativity
+4. Types: Insults, Harassment, Xenophobia, Racism, Homophobia, Bullying, Threats, Spam, Profanity, Negativity`;
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 1500,
+        temperature: 0.1
+      });
+
+      const text = response.choices[0].message.content;
+      const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      const result = JSON.parse(cleaned);
+      
+      result.friendlinessScore = clamp(result.friendlinessScore ?? 5, 0, 10);
+      result.sentiment = result.sentiment || { friendly: 0, neutral: messageCount, unfriendly: 0 };
+      result.flaggedMessages = result.flaggedMessages || [];
+      result.toxicityTypes = result.toxicityTypes || {};
+      result.recommendation = result.recommendation || 'Continue monitoring your community.';
+      
+      const sentimentTotal = (result.sentiment.friendly || 0) + (result.sentiment.neutral || 0) + (result.sentiment.unfriendly || 0);
+      if (sentimentTotal !== messageCount && sentimentTotal > 0) {
+        const ratio = messageCount / sentimentTotal;
+        result.sentiment.friendly = Math.round((result.sentiment.friendly || 0) * ratio);
+        result.sentiment.neutral = Math.round((result.sentiment.neutral || 0) * ratio);
+        result.sentiment.unfriendly = messageCount - result.sentiment.friendly - result.sentiment.neutral;
+      } else if (sentimentTotal === 0) {
+        result.sentiment = { friendly: 0, neutral: messageCount, unfriendly: 0 };
+      }
+      
+      // Attach token usage for cost tracking
+      result._usage = {
+        input_tokens: response.usage?.prompt_tokens || 0,
+        output_tokens: response.usage?.completion_tokens || 0
+      };
+      
+      return result;
+    } catch (error) {
+      lastError = error;
+      console.error(`OpenAI API error (attempt ${attempt}/3):`, error.message);
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+  }
+  
+  console.error('OpenAI API failed after 3 attempts:', lastError);
+  throw new Error('Analysis failed after multiple attempts. Please try again later.');
+}
+
+// ============================================
+// DISCORD BOT SETUP
+// ============================================
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages]
+});
+
+// ============================================
+// REGISTER COMMANDS
+// ============================================
+
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('vibe')
+      .setDescription('Check how friendly your community is')
+      .addChannelOption(opt => opt.setName('channel').setDescription('Channel to analyze').setRequired(false).addChannelTypes(ChannelType.GuildText))
+      .addStringOption(opt => opt.setName('timeframe').setDescription('How far back?').setRequired(false)
+        .addChoices(
+          { name: '⏱️ 1 hour', value: '1h' }, 
+          { name: '⏱️ 12 hours', value: '12h' }, 
+          { name: '⏱️ 24 hours (default)', value: '24h' }, 
+          { name: '📅 3 days', value: '3d' }, 
+          { name: '📅 7 days', value: '7d' }, 
+          { name: '📅 30 days', value: '30d' }
+        ))
+      .addStringOption(opt => opt.setName('messages').setDescription('Messages to analyze').setRequired(false)
+        .addChoices(
+          { name: '💬 20 messages', value: '20' },
+          { name: '💬 50 messages', value: '50' }, 
+          { name: '💬 100 messages (default)', value: '100' }, 
+          { name: '💬 150 messages', value: '150' }, 
+          { name: '💬 200 messages', value: '200' }, 
+          { name: '📊 500 messages', value: '500' }, 
+          { name: '📊 1000 messages', value: '1000' }
+        ))
+      .addStringOption(opt => opt.setName('sensitivity').setDescription('How strict?').setRequired(false)
+        .addChoices({ name: '🎮 Low - Gaming/Adult', value: 'low' }, { name: '⚖️ Medium - General (default)', value: 'medium' }, { name: '👶 High - Kids/Family', value: 'high' }))
+      .addStringOption(opt => opt.setName('visibility').setDescription('Who sees the report?').setRequired(false)
+        .addChoices({ name: '📢 Public (stays in channel)', value: 'public' }, { name: '🔒 Private (only you)', value: 'private' })),
+    
+    new SlashCommandBuilder()
+      .setName('vibe-progress')
+      .setDescription('See your community progress')
+      .addChannelOption(opt => opt.setName('channel').setDescription('Channel to analyze').setRequired(false).addChannelTypes(ChannelType.GuildText))
+      .addStringOption(opt => opt.setName('range').setDescription('Time range').setRequired(false)
+        .addChoices({ name: '📅 Last 24 hours', value: '1d' }, { name: '📅 Last 14 days', value: '14d' }, { name: '📅 Last 30 days', value: '30d' }, { name: '✏️ Custom # of reports', value: 'custom' })),
+    
+    new SlashCommandBuilder()
+      .setName('vibe-admin')
+      .setDescription('Admin controls (owner only)')
+      .addStringOption(opt => opt.setName('action').setDescription('Action to perform').setRequired(true)
+        .addChoices(
+          { name: '✅ Approve server (Pro)', value: 'approve' },
+          { name: '❌ Deny server', value: 'deny' },
+          { name: '🔄 Reset to pending', value: 'reset' },
+          { name: '🎁 Reset free trial', value: 'freetrial' },
+          { name: '📈 Grant progress access', value: 'grant_progress' },
+          { name: '🚫 Revoke progress access', value: 'revoke_progress' },
+          { name: '🔄 Renew subscription', value: 'renew' },
+          { name: '📊 Check status', value: 'status' },
+          { name: '🗑️ Delete all server data (GDPR)', value: 'delete_data' }
+        ))
+      .addStringOption(opt => opt.setName('server_id').setDescription('Server ID').setRequired(true))
+      .addIntegerOption(opt => opt.setName('days').setDescription('Subscription length in days (default: 30)').setRequired(false))
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    console.log('📝 Registering commands...');
+    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands.map(c => c.toJSON()) });
+    console.log('✅ Commands registered!');
+  } catch (error) {
+    console.error('❌ Failed to register commands:', error);
+  }
+}
+
+// ============================================
 // STARTUP VALIDATION
-// ============================================================
+// ============================================
 
 function validateEnvironment() {
   const required = ['DISCORD_TOKEN', 'CLIENT_ID', 'OPENAI_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY'];
   const missing = required.filter(key => !process.env[key]);
+  
   if (missing.length > 0) {
     console.error('❌ FATAL: Missing required environment variables:');
     missing.forEach(key => console.error(`   - ${key}`));
     process.exit(1);
   }
-
-  // Auto-detect placeholder Stripe yearly link
-  if (!CONFIG.STRIPE_YEARLY_LINK || CONFIG.STRIPE_YEARLY_LINK.includes('YOUR_')) {
-    console.warn('⚠️  Yearly plan disabled — placeholder Stripe link detected.');
+  
+  if (CONFIG.STRIPE_YEARLY_LINK.includes('YOUR_YEARLY_LINK_HERE')) {
+    console.warn('⚠️  Yearly plan DISABLED - placeholder link detected');
     CONFIG.YEARLY_ENABLED = false;
+  } else {
+    CONFIG.YEARLY_ENABLED = true;
+    console.log('✅ Yearly plan enabled');
   }
-
+  
+  const supabaseKey = process.env.SUPABASE_KEY || '';
+  if (supabaseKey.includes('service_role') || supabaseKey.length > 200) {
+    console.error('');
+    console.error('⚠️  SECURITY WARNING: You may be using a service_role key!');
+    console.error('');
+  }
+  
   console.log('✅ Environment validated');
 }
 
 validateEnvironment();
 
-// ============================================================
-// GLOBAL ERROR HANDLERS
-// ============================================================
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection:', reason?.message || reason);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err.message);
-  // Don't exit — let Railway handle restarts if truly fatal
-});
-
-// ============================================================
-// API CLIENTS
-// ============================================================
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const resend = new Resend(process.env.RESEND_API_KEY);
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
-
-// ============================================================
-// DISCORD CLIENT
-// ============================================================
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
-});
-
-// ============================================================
-// USAGE TRACKING (in-memory, backed by Supabase)
-// ============================================================
-
-const serverUsage = new Map();
-const cooldowns = new Map();
-const serverThrottle = new Map(); // server_id -> { count, resetAt }
-
-async function getUsageFromDB(serverId) {
+async function checkMessageContentIntent(client) {
   try {
-    const { data } = await supabase
-      .from('usage')
-      .select('*')
-      .eq('server_id', serverId)
-      .single();
-    return data;
-  } catch { return null; }
-}
-
-async function getReportsUsed(serverId) {
-  const dbUsage = await getUsageFromDB(serverId);
-  if (dbUsage) return dbUsage.reports_used || 0;
-  if (!serverUsage.has(serverId)) serverUsage.set(serverId, { reportsUsed: 0 });
-  return serverUsage.get(serverId).reportsUsed;
-}
-
-async function isPaid(serverId) {
-  try {
-    const { data } = await supabase
-      .from('paid_servers')
-      .select('server_id, expires_at')
-      .eq('server_id', serverId)
-      .single();
-    if (!data) return false;
-    if (data.expires_at && new Date(data.expires_at) < new Date()) return false;
-    return true;
-  } catch { return false; }
-}
-
-async function getFreeBonus(serverId) {
-  try {
-    const { data } = await supabase.from('usage').select('free_bonus').eq('server_id', serverId).single();
-    return data?.free_bonus || 0;
-  } catch { return 0; }
-}
-
-async function getSubscriptionStatus(serverId) {
-  try {
-    const { data } = await supabase
-      .from('paid_servers')
-      .select('expires_at')
-      .eq('server_id', serverId)
-      .single();
-    if (!data || !data.expires_at) return { isActive: false, daysLeft: 0 };
-    const msLeft = new Date(data.expires_at).getTime() - Date.now();
-    const daysLeft = Math.ceil(msLeft / (1000 * 60 * 60 * 24));
-    return { isActive: daysLeft > 0, daysLeft: Math.max(0, daysLeft) };
-  } catch { return { isActive: false, daysLeft: 0 }; }
-}
-
-async function canUseBot(serverId) {
-  const paid = await isPaid(serverId);
-  const used = await getReportsUsed(serverId);
-  if (paid) return used < CONFIG.PRO_REPORTS_PER_MONTH;
-  const bonus = await getFreeBonus(serverId);
-  return used < (CONFIG.FREE_REPORTS + bonus);
-}
-
-async function getReportsRemaining(serverId) {
-  const paid = await isPaid(serverId);
-  const used = await getReportsUsed(serverId);
-  if (paid) return CONFIG.PRO_REPORTS_PER_MONTH - used;
-  const bonus = await getFreeBonus(serverId);
-  return (CONFIG.FREE_REPORTS + bonus) - used;
-}
-
-async function incrementUsage(serverId) {
-  try {
-    const { data } = await supabase
-      .from('usage')
-      .select('reports_used')
-      .eq('server_id', serverId)
-      .single();
-
-    if (data) {
-      await supabase
-        .from('usage')
-        .update({ reports_used: (data.reports_used || 0) + 1 })
-        .eq('server_id', serverId);
-    } else {
-      await supabase
-        .from('usage')
-        .insert({ server_id: serverId, reports_used: 1, month_start: new Date().toISOString() });
-    }
-  } catch {
-    if (!serverUsage.has(serverId)) serverUsage.set(serverId, { reportsUsed: 0 });
-    serverUsage.get(serverId).reportsUsed++;
-  }
-}
-
-function isOnCooldown(userId) {
-  const last = cooldowns.get(userId);
-  if (!last) return false;
-  return (Date.now() - last) < CONFIG.COOLDOWN_SECONDS * 1000;
-}
-
-function setCooldown(userId) {
-  cooldowns.set(userId, Date.now());
-}
-
-function isServerThrottled(serverId) {
-  const now = Date.now();
-  const entry = serverThrottle.get(serverId);
-  if (!entry || now > entry.resetAt) {
-    serverThrottle.set(serverId, { count: 0, resetAt: now + 60000 });
-    return false;
-  }
-  return entry.count >= CONFIG.SERVER_THROTTLE_PER_MINUTE;
-}
-
-function incrementServerThrottle(serverId) {
-  const now = Date.now();
-  const entry = serverThrottle.get(serverId);
-  if (!entry || now > entry.resetAt) {
-    serverThrottle.set(serverId, { count: 1, resetAt: now + 60000 });
-  } else {
-    entry.count++;
-  }
-}
-
-// ============================================================
-// FETCH MESSAGES FROM A CHANNEL
-// ============================================================
-
-// ============================================================
-// MESSAGE SANITIZATION
-// ============================================================
-
-function sanitizeMessage(text) {
-  if (!text || typeof text !== 'string') return '';
-  return text
-    .replace(/<@!?\d+>/g, '[user]')          // user mentions
-    .replace(/<#\d+>/g, '[channel]')           // channel mentions
-    .replace(/<@&\d+>/g, '[role]')             // role mentions
-    .replace(/@(everyone|here)/g, '[mention]') // @everyone / @here
-    .replace(/https?:\/\/\S+/g, '[link]')      // URLs
-    .replace(/\w{50,}/g, '[...]')               // absurdly long words (potential injection)
-    .trim()
-    .slice(0, 500);                             // hard cap per message
-}
-
-function canReadChannel(guild, channel) {
-  const me = guild.members.me;
-  if (!me) return false;
-  const perms = channel.permissionsFor(me);
-  return perms?.has('ViewChannel') && perms?.has('ReadMessageHistory');
-}
-
-async function fetchChannelMessages(channel, messageCount, timeframeMs) {
-  const cutoffTime = Date.now() - timeframeMs;
-  let allMessages = [];
-  let lastId;
-
-  while (allMessages.length < messageCount) {
-    const options = { limit: 100 };
-    if (lastId) options.before = lastId;
-
-    const fetched = await channel.messages.fetch(options);
-    if (fetched.size === 0) break;
-
-    const filtered = fetched.filter(m =>
-      !m.author.bot &&
-      m.content.length > 0 &&
-      m.createdTimestamp > cutoffTime
+    const guild = client.guilds.cache.first();
+    if (!guild) return;
+    const channel = guild.channels.cache.find(c => 
+      c.type === ChannelType.GuildText && 
+      c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.ViewChannel)
     );
-
-    allMessages.push(...filtered.map(m => sanitizeMessage(m.content)).filter(Boolean));
-    lastId = fetched.last().id;
-
-    if (fetched.last().createdTimestamp < cutoffTime) break;
-  }
-
-  return allMessages.slice(0, messageCount);
-}
-
-// ============================================================
-// AI ANALYSIS
-// ============================================================
-
-async function analyzeMessages(messages, channelNames, sensitivity, timeframeLabel) {
-  const totalMessages = messages.length;
-
-  // Safety: trim if too large
-  let trimmedMessages = messages;
-  let totalChars = messages.join(' ').length;
-  if (totalChars > CONFIG.MAX_OPENAI_CHARS) {
-    const ratio = CONFIG.MAX_OPENAI_CHARS / totalChars;
-    trimmedMessages = messages.slice(0, Math.floor(totalMessages * ratio));
-  }
-
-  const analyzedCount = trimmedMessages.length;
-  const sensitivityPrompt = SENSITIVITY_PROMPTS[sensitivity] || SENSITIVITY_PROMPTS.medium;
-
-  const prompt = `You are Vibe Check Bot, a community behavior analyzer.
-
-${sensitivityPrompt}
-
-Analyze these ${analyzedCount} messages from ${channelNames.join(', ')} (last ${timeframeLabel}).
-
-RULES:
-- sentiment counts (friendly + neutral + unfriendly) MUST add up to exactly ${analyzedCount}
-- Each message belongs to exactly ONE category
-- Flag ALL unfriendly messages — do not limit to top 5
-- Understand messages in ANY language — translate mentally before judging
-- Provide specific, actionable AI recommendations
-
-MESSAGES TO ANALYZE:
-${trimmedMessages.map((m, i) => `${i + 1}. ${m}`).join('\n')}
-
-Respond ONLY with this exact JSON (no markdown, no extra text):
-{
-  "friendlinessScore": <0-10 number>,
-  "sentiment": {
-    "friendly": <integer>,
-    "neutral": <integer>,
-    "unfriendly": <integer>
-  },
-  "flaggedMessages": [
-    {
-      "message": "<exact message text>",
-      "type": "<insult|harassment|threat|hate_speech|bullying|profanity|spam|other>",
-      "severity": <1-10>
+    if (!channel) return;
+    const messages = await channel.messages.fetch({ limit: 1 });
+    const msg = messages.first();
+    if (msg && msg.content === '' && !msg.embeds.length && !msg.attachments.size) {
+      console.error('⚠️  MESSAGE CONTENT INTENT MAY BE DISABLED');
     }
-  ],
-  "toxicityTypes": {
-    "insults": <count>,
-    "harassment": <count>,
-    "threats": <count>,
-    "hate_speech": <count>,
-    "bullying": <count>,
-    "profanity": <count>,
-    "spam": <count>
-  },
-  "recommendation": "<2-3 specific, actionable sentences for the server admin>",
-  "summary": "<1 sentence overall verdict>"
-}`;
-
-  const startTime = Date.now();
-  let response;
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
-        max_tokens: 2000
-      });
-      break; // success
-    } catch (err) {
-      const isRetryable = err.status === 429 || err.status >= 500;
-      if (attempt === maxAttempts || !isRetryable) throw err;
-      const delay = attempt * 2000; // 2s, 4s
-      console.warn(`⚠️ OpenAI attempt ${attempt} failed (${err.status}), retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-
-  const processingTime = Date.now() - startTime;
-  const usage = response.usage;
-  const cost = (
-    (usage.prompt_tokens / 1000000) * CONFIG.COST_PER_1M_INPUT_TOKENS +
-    (usage.completion_tokens / 1000000) * CONFIG.COST_PER_1M_OUTPUT_TOKENS
-  );
-
-  let result = JSON.parse(response.choices[0].message.content.trim());
-  result.friendlinessScore = clamp(result.friendlinessScore, 0, 10);
-
-  // Validate sentiment totals
-  const sentimentTotal = result.sentiment.friendly + result.sentiment.neutral + result.sentiment.unfriendly;
-  if (sentimentTotal !== analyzedCount) {
-    const scale = analyzedCount / sentimentTotal;
-    result.sentiment.friendly = Math.round(result.sentiment.friendly * scale);
-    result.sentiment.neutral = Math.round(result.sentiment.neutral * scale);
-    result.sentiment.unfriendly = analyzedCount - result.sentiment.friendly - result.sentiment.neutral;
-  }
-
-  return { result, analyzedCount, totalMessages, processingTime, cost, inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens };
+  } catch (error) {}
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
-
-function clamp(val, min, max) {
-  return Math.min(Math.max(Number(val) || 0, min), max);
-}
-
-// ============================================================
-// BUILD SCORE BAR
-// ============================================================
-
-function buildScoreBar(score) {
-  const filled = Math.round(score);
-  return '█'.repeat(filled) + '░'.repeat(10 - filled);
-}
-
-function scoreColor(score) {
-  if (score >= 7) return 0x22c55e;
-  if (score >= 4) return 0xf59e0b;
-  return 0xef4444;
-}
-
-function scoreEmoji(score) {
-  if (score >= 8) return '🟢';
-  if (score >= 5) return '🟡';
-  return '🔴';
-}
-
-// ============================================================
-// BUILD DISCORD EMBED REPORT
-// ============================================================
-
-function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions = null, stats = null, isPublic = false, channelMsgCounts = {}, channelResults = {}) {
-  const score = result.friendlinessScore;
-  const bar = buildScoreBar(score);
-  const { friendly, neutral, unfriendly } = result.sentiment;
-  const total = friendly + neutral + unfriendly;
-
-  const friendlyPct = Math.round((friendly / total) * 100);
-  const neutralPct = Math.round((neutral / total) * 100);
-  const unfriendlyPct = Math.round((unfriendly / total) * 100);
-
-  const channelDisplay = channelNames.length === 1
-    ? channelNames[0]
-    : channelNames.join(', ');
-
-  const communityDesc = score >= 8 ? 'Your community is thriving and welcoming.'
-    : score >= 6 ? 'Your community is generally positive.'
-    : score >= 4 ? 'Your community has a mixed atmosphere.'
-    : 'Your community needs attention.';
-
-  const embed = new EmbedBuilder()
-    .setColor(scoreColor(score))
-    .setTitle(channelNames.length > 1 ? `📊 Multi-Channel Vibe Report` : `📊 Community Vibe Report`)
-    .setDescription(
-      `**${channelDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages • Sensitivity: **${sensitivity.charAt(0).toUpperCase() + sensitivity.slice(1)}**\n\n` +
-      `${scoreEmoji(score)} **Friendliness Score: ${score}/10**\n` +
-      `\`${bar}\`\n` +
-      `*${communityDesc}*`
-    );
-
-  // ── Section 1: Descriptive ──
-  // Member stats
-  if (stats) {
-    const memberLine = stats.membersWithAccess !== null
-      ? `👥 Members with access: **${stats.membersWithAccess}** | 💬 Active (7d): **${stats.activeMembers}**`
-      : `👥 Server members: **${stats.totalMembers}**`;
-    embed.addFields({ name: '📋 Channel Info', value: memberLine, inline: false });
-  }
-
-  // ── Multi-channel: Impact Score label + per-channel scores ──
-  if (channelNames.length > 1) {
-    // Label the overall score as Impact Score
-    const chScoreLines = channelNames.map(ch => {
-      const res = channelResults[ch];
-      if (!res) return `${ch}  —  not enough data`;
-      const chScore = res.result.friendlinessScore;
-      const chBar = '█'.repeat(Math.round(chScore)) + '░'.repeat(10 - Math.round(chScore));
-      const chEmoji = chScore >= 7 ? '🟢' : chScore >= 4 ? '🟡' : '🔴';
-      const msgCount = channelMsgCounts[ch] || 0;
-      return `${chEmoji} **${ch}**  \`${chBar}\`  **${chScore}/10**  (${msgCount} msgs)`;
-    });
-    embed.addFields({
-      name: `⚡ Impact Score: ${score}/10 — Per-Channel Breakdown`,
-      value: chScoreLines.join('\n'),
-      inline: false
-    });
-  }
-
-  embed.addFields({
-    name: '💬 Sentiment Breakdown',
-    value:
-      `🟢 Friendly   \`${String(friendly).padStart(4)}\`  ${friendlyPct}%\n` +
-      `⚪ Neutral    \`${String(neutral).padStart(4)}\`  ${neutralPct}%\n` +
-      `🔴 Unfriendly \`${String(unfriendly).padStart(4)}\`  ${unfriendlyPct}%`,
-    inline: false
-  });
-
-  // ── Section 2: Toxicity ──
-  if (isPublic) {
-    // Public report — never show message content, only counts and types
-    const flaggedCount = result.flaggedMessages?.length || 0;
-    if (flaggedCount > 0) {
-      const typeBreakdown = result.toxicityTypes
-        ? Object.entries(result.toxicityTypes)
-            .filter(([, v]) => v > 0)
-            .sort((a, b) => b[1] - a[1])
-            .map(([k, v]) => `• ${k}: ${v}`)
-            .join('\n')
-        : 'See full report for details.';
-      embed.addFields({
-        name: `⚠️ Toxicity Summary (${flaggedCount} flagged)`,
-        value: typeBreakdown.substring(0, 1024) || 'Types unavailable.',
-        inline: false
-      });
-    } else {
-      embed.addFields({ name: '✅ No Flagged Content', value: 'No harmful content detected.', inline: false });
-    }
-  } else {
-    // Private report — show toxicity breakdown bars + full flagged messages
-    if (result.toxicityTypes && Object.keys(result.toxicityTypes).length > 0) {
-      const types = Object.entries(result.toxicityTypes)
-        .filter(([, v]) => v > 0)
-        .sort((a, b) => b[1] - a[1]);
-      const maxVal = types[0]?.[1] || 1;
-      const bars = types.map(([k, v]) => {
-        const filled = Math.round((v / maxVal) * 8);
-        const bar = '█'.repeat(filled) + '░'.repeat(8 - filled);
-        return `\`${bar}\` ${k}: ${v}`;
-      }).join('\n');
-      embed.addFields({ name: '🧪 Toxicity Breakdown', value: bars, inline: false });
-    }
-
-    if (result.flaggedMessages && result.flaggedMessages.length > 0) {
-      const flaggedList = result.flaggedMessages
-        .sort((a, b) => b.severity - a.severity)
-        .slice(0, 10)
-        .map(f => `• [\`${f.type}\` ${f.severity}/10] ${f.message.substring(0, 80)}${f.message.length > 80 ? '...' : ''}`)
-        .join('\n');
-
-      embed.addFields({
-        name: `⚠️ Flagged Messages (${result.flaggedMessages.length})`,
-        value: flaggedList.substring(0, 1024),
-        inline: false
-      });
-
-      if (result.flaggedMessages.length > 10) {
-        embed.addFields({
-          name: '',
-          value: `_...and ${result.flaggedMessages.length - 10} more in the email report_`,
-          inline: false
-        });
-      }
-    } else {
-      embed.addFields({ name: '✅ No Flagged Messages', value: 'No harmful content detected.', inline: false });
-    }
-  }
-
-  // ── Section 3: Reactions ──
-  if (reactions && !isPublic) {
-    // Reaction comments contain message text — private only
-    const reactionLines = [];
-    if (reactions.mostReacted)  reactionLines.push(`⭐ **Most reacted:** "${reactions.mostReacted.text}" — ${reactions.mostReacted.reactions}`);
-    if (reactions.mostPositive) reactionLines.push(`👍 **Most positive:** "${reactions.mostPositive.text}" — ${reactions.mostPositive.reactions}`);
-    if (reactions.mostNegative) reactionLines.push(`👎 **Most negative:** "${reactions.mostNegative.text}" — ${reactions.mostNegative.reactions}`);
-    if (reactionLines.length > 0) {
-      embed.addFields({ name: '💬 Most Reacted Comments', value: reactionLines.join('\n'), inline: false });
-    }
-  } else if (reactions && isPublic) {
-    // Public — show reaction counts only, no message text
-    const reactionLines = [];
-    if (reactions.mostReacted)  reactionLines.push(`⭐ **Most reacted:** ${reactions.mostReacted.reactions}`);
-    if (reactions.mostPositive) reactionLines.push(`👍 **Most positive reactions:** ${reactions.mostPositive.reactions}`);
-    if (reactions.mostNegative) reactionLines.push(`👎 **Most negative reactions:** ${reactions.mostNegative.reactions}`);
-    if (reactionLines.length > 0) {
-      embed.addFields({ name: '💬 Reaction Summary', value: reactionLines.join('\n'), inline: false });
-    }
-  }
-
-  // ── Vibe Insights (after reactions, before recommendations) ──
-  if (result.summary) {
-    embed.addFields({ name: '🗒️ Vibe Insights', value: result.summary, inline: false });
-  }
-
-  // ── Vibe Check Bot Recommendations (always last) ──
-  if (result.recommendation) {
-    embed.addFields({ name: '💡 Vibe Check Bot Recommendations', value: result.recommendation, inline: false });
-  }
-
-  // CTA
-  embed.addFields({
-    name: '🔧 Need Help?',
-    value: `Request research-based strategies to improve your community.\n📧 **${CONFIG.CONTACT_EMAIL}**`,
-    inline: false
-  });
-
-  const planType = isPaidServer ? '⚡ Pro' : '🎁 Free Trial';
-  const reportWord = remaining === 1 ? 'report' : 'reports';
-  embed.setFooter({
-    text: `Vibe Check Bot • ${planType} • ${remaining} ${reportWord} remaining • Sensitivity: ${sensitivity}`
-  });
-
-  return embed;
-}
-
-// ============================================================
-// SAVE REPORT TO SUPABASE
-// ============================================================
-
-// ============================================================
-// RESEARCH LOGGING
-// ============================================================
-
-async function logResearchData(data) {
-  try {
-    // One row per channel — use per-channel score when available
-    const rows = data.channelNames.map(channelName => {
-      const chRes = data.channelResults?.[channelName];
-      const chScore = chRes ? chRes.result.friendlinessScore : data.score;
-      const chSentiment = chRes ? chRes.result.sentiment : { friendly: 0, neutral: 0, unfriendly: 0 };
-      const chFlagged = chRes ? (chRes.result.flaggedMessages?.length || 0) : data.flaggedCount;
-      const chToxTypes = chRes ? (chRes.result.toxicityTypes || {}) : data.toxicityTypes;
-      const chMsgs = chRes ? chRes.analyzedCount : data.analyzedCount;
-      return {
-        server_name:        data.serverName,
-        server_id:          data.serverId,
-        member_count:       data.memberCount,
-        channel_name:       channelName,
-        messages_analyzed:  chMsgs,
-        score:              chScore,
-        friendly:           chSentiment.friendly,
-        neutral:            chSentiment.neutral,
-        unfriendly:         chSentiment.unfriendly,
-        flagged_count:      chFlagged,
-        toxicity_types:     chToxTypes,
-        sensitivity:        data.sensitivity,
-        timeframe:          data.timeframe,
-        is_pro:             data.isPro,
-        input_tokens:       data.inputTokens,
-        output_tokens:      data.outputTokens,
-        cost_usd:           data.cost,
-        processing_time_ms: data.processingTime
-      };
-    });
-
-    const { error } = await supabase.from('research_logs').insert(rows);
-    if (error) console.error('Research log error:', error.message);
-    else console.log(`📊 Research logged: ${rows.length} channel(s), score ${data.score}, $${data.cost?.toFixed(6)}`);
-  } catch (err) {
-    console.error('Research logging failed:', err.message);
-  }
-}
-
-async function saveReport(serverId, serverName, channelNames, score, sentiment, flaggedCount, sensitivity, timeframe, analyzedCount, toxicityTypes) {
-  try {
-    await supabase.from('reports').insert({
-      server_id: serverId,
-      server_name: serverName,
-      channel_name: channelNames.join(', '),
-      score: score,
-      friendly: sentiment.friendly,
-      neutral: sentiment.neutral,
-      unfriendly: sentiment.unfriendly,
-      flagged_count: flaggedCount,
-      sensitivity: sensitivity,
-      timeframe: timeframe,
-      messages_analyzed: analyzedCount,
-      toxicity_types: JSON.stringify(toxicityTypes || {}),
-      created_at: new Date().toISOString()
-    });
-  } catch (err) {
-    console.error('Save report error:', err.message);
-  }
-}
-
-// ============================================================
-// SEND EMAIL REPORT
-// ============================================================
-
-async function sendEmailReport(serverName, serverId, channelNames, result, analyzedCount, timeframe, sensitivity, remaining) {
-  try {
-    const flaggedHtml = result.flaggedMessages && result.flaggedMessages.length > 0
-      ? result.flaggedMessages
-        .sort((a, b) => b.severity - a.severity)
-        .map(f => `<li><strong>[${f.type} - ${f.severity}/10]</strong> ${f.message}</li>`)
-        .join('')
-      : '<li>No flagged messages</li>';
-
-    await resend.emails.send({
-      from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
-      to: CONFIG.REPORT_EMAIL,
-      subject: `📊 Vibe Report — ${serverName} | Score: ${result.friendlinessScore}/10`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-          <h2 style="color:#F97316">📊 Vibe Check Bot Report</h2>
-          <table style="width:100%;border-collapse:collapse">
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Server</strong></td><td>${serverName}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Server ID</strong></td><td>${serverId}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Channel(s)</strong></td><td>${channelNames.join(', ')}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Messages</strong></td><td>${analyzedCount}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Timeframe</strong></td><td>${timeframe}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Sensitivity</strong></td><td>${sensitivity}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Score</strong></td><td><strong style="color:${result.friendlinessScore >= 7 ? '#22c55e' : result.friendlinessScore >= 4 ? '#f59e0b' : '#ef4444'}">${result.friendlinessScore}/10</strong></td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Friendly</strong></td><td>${result.sentiment.friendly}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Neutral</strong></td><td>${result.sentiment.neutral}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Unfriendly</strong></td><td>${result.sentiment.unfriendly}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Flagged</strong></td><td>${result.flaggedMessages ? result.flaggedMessages.length : 0}</td></tr>
-            <tr><td style="padding:6px;border-bottom:1px solid #eee"><strong>Reports Remaining</strong></td><td>${remaining}</td></tr>
-          </table>
-          <h3 style="margin-top:20px">⚠️ All Flagged Messages</h3>
-          <ul>${flaggedHtml}</ul>
-          <h3>💡 Vibe Check Bot Recommendations</h3>
-          <p>${result.recommendation || 'N/A'}</p>
-        </div>
-      `
-    });
-  } catch (err) {
-    console.error('Email error:', err.message);
-  }
-}
-
-// ============================================================
-// NOTIFICATION EMAILS (owner alerts)
-// ============================================================
-
-async function sendNewTrialEmail(serverName, serverId, userName) {
-  try {
-    await resend.emails.send({
-      from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
-      to: CONFIG.REPORT_EMAIL,
-      subject: `🆕 New Free Trial: ${serverName}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-          <div style="background:linear-gradient(135deg,#3b82f6,#1d4ed8);padding:20px;text-align:center">
-            <h1 style="color:white;margin:0">🆕 New Free Trial Started</h1>
-          </div>
-          <div style="padding:20px;background:#f9fafb">
-            <p><strong>Server:</strong> ${serverName}</p>
-            <p><strong>Server ID:</strong> ${serverId}</p>
-            <p><strong>Started by:</strong> ${userName}</p>
-            <p><strong>Free reports:</strong> ${CONFIG.FREE_REPORTS}</p>
-          </div>
-          <div style="padding:20px;background:#eff6ff">
-            <p style="margin:0">💡 This is report #1 of ${CONFIG.FREE_REPORTS}. You'll get another notification when their trial ends.</p>
-          </div>
-        </div>
-      `
-    });
-  } catch (err) { console.error('New trial email error:', err.message); }
-}
-
-async function sendTrialEndedEmail(serverName, serverId, userName) {
-  try {
-    await resend.emails.send({
-      from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
-      to: CONFIG.REPORT_EMAIL,
-      subject: `🔔 Trial Ended: ${serverName}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-          <div style="background:linear-gradient(135deg,#f59e0b,#d97706);padding:20px;text-align:center">
-            <h1 style="color:white;margin:0">🔔 Trial Ended</h1>
-          </div>
-          <div style="padding:20px;background:#f9fafb">
-            <p><strong>Server:</strong> ${serverName}</p>
-            <p><strong>Server ID:</strong> ${serverId}</p>
-            <p><strong>Last used by:</strong> ${userName}</p>
-            <p><strong>Reports used:</strong> ${CONFIG.FREE_REPORTS}/${CONFIG.FREE_REPORTS}</p>
-          </div>
-          <div style="padding:20px;background:#fef3c7">
-            <p style="margin:0">💰 They've been shown the Stripe payment link.</p>
-            <p style="margin-top:10px">To give them extra free reports: <code>/vibe-admin action:test server_id:${serverId}</code></p>
-            <p style="margin-top:6px">To activate Pro manually: <code>/vibe-admin action:pro server_id:${serverId}</code></p>
-          </div>
-        </div>
-      `
-    });
-  } catch (err) { console.error('Trial ended email error:', err.message); }
-}
-
-async function sendProgressReportEmail(serverName, serverId, channelNames, reports, requestedBy) {
-  try {
-    if (!reports || reports.length < 2) return;
-    const oldest = reports[0];
-    const latest = reports[reports.length - 1];
-    const diff = (latest.score - oldest.score).toFixed(1);
-    const trend = diff > 0 ? `📈 +${diff}` : diff < 0 ? `📉 ${diff}` : `➡️ 0.0`;
-    await resend.emails.send({
-      from: 'Vibe Check Bot <noreply@vibecheckbot.com>',
-      to: CONFIG.REPORT_EMAIL,
-      subject: `📈 Progress Report Viewed — ${serverName}`,
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-          <div style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:20px;text-align:center">
-            <h1 style="color:white;margin:0">📈 Progress Report</h1>
-          </div>
-          <div style="padding:20px;background:#f9fafb">
-            <p><strong>Server:</strong> ${serverName}</p>
-            <p><strong>Server ID:</strong> ${serverId}</p>
-            <p><strong>Requested by:</strong> ${requestedBy}</p>
-            <p><strong>Channels:</strong> ${channelNames.join(', ')}</p>
-            <p><strong>Reports analyzed:</strong> ${reports.length}</p>
-            <p><strong>Score trend:</strong> ${oldest.score}/10 → ${latest.score}/10 (${trend})</p>
-          </div>
-        </div>
-      `
-    });
-  } catch (err) { console.error('Progress email error:', err.message); }
-}
-
-// ============================================================
-// REGISTER SLASH COMMANDS
-// ============================================================
-
-async function registerCommands() {
-  const vibeCommand = new SlashCommandBuilder()
-    .setName('vibe')
-    .setDescription('Check the friendliness of one or more channels')
-    .addChannelOption(opt =>
-      opt.setName('channel').setDescription('Channel to analyze (default: current)').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel2').setDescription('2nd channel to include').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel3').setDescription('3rd channel to include').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel4').setDescription('4th channel to include').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel5').setDescription('5th channel to include').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addStringOption(opt =>
-      opt.setName('timeframe').setDescription('How far back to analyze (default: 7d)').setRequired(false)
-        .addChoices(
-          { name: '1 hour', value: '1h' },
-          { name: '24 hours', value: '24h' },
-          { name: '7 days', value: '7d' },
-          { name: '14 days', value: '14d' },
-          { name: '30 days', value: '30d' }
-        ))
-    .addStringOption(opt =>
-      opt.setName('sensitivity').setDescription('How strict the analysis is (default: medium)').setRequired(false)
-        .addChoices(
-          { name: '🎮 Low — Gaming/Adult', value: 'low' },
-          { name: '⚖️ Medium — General', value: 'medium' },
-          { name: '👶 High — Kids/Family', value: 'high' }
-        ))
-    .addStringOption(opt =>
-      opt.setName('visibility').setDescription('Who sees the report (default: private)').setRequired(false)
-        .addChoices(
-          { name: '🔒 Private — only you', value: 'private' },
-          { name: '📢 Public — everyone in channel', value: 'public' }
-        ))
-    .addIntegerOption(opt =>
-      opt.setName('messages').setDescription('Messages per channel to analyze (default: 100)').setRequired(false)
-        .addChoices(
-          { name: '50 messages', value: 50 },
-          { name: '100 messages', value: 100 },
-          { name: '250 messages', value: 250 },
-          { name: '500 messages', value: 500 },
-          { name: '1000 messages (Pro)', value: 1000 }
-        ));
-
-  const progressCommand = new SlashCommandBuilder()
-    .setName('vibe-progress')
-    .setDescription('See your community friendliness trend over time')
-    .addStringOption(opt =>
-      opt.setName('range').setDescription('How many past reports to show (default: 10)').setRequired(false)
-        .addChoices(
-          { name: 'Last 5 reports', value: '5' },
-          { name: 'Last 10 reports', value: '10' },
-          { name: 'Last 20 reports', value: '20' },
-          { name: 'Last 30 days', value: '30d' }
-        ))
-    .addChannelOption(opt =>
-      opt.setName('channel').setDescription('Compare channel 1').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel2').setDescription('Compare channel 2').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel3').setDescription('Compare channel 3').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel4').setDescription('Compare channel 4').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(opt =>
-      opt.setName('channel5').setDescription('Compare channel 5').setRequired(false)
-        .addChannelTypes(ChannelType.GuildText));
-
-  const adminCommand = new SlashCommandBuilder()
-    .setName('vibe-admin')
-    .setDescription('Admin controls (owner only)')
-    .addStringOption(opt =>
-      opt.setName('action').setDescription('Action to perform').setRequired(true)
-        .addChoices(
-          { name: '🧪 Test — give extra free reports', value: 'test' },
-          { name: '⚡ Pro — activate Pro', value: 'pro' },
-          { name: '🔴 Pro Off — deactivate Pro', value: 'pro_off' }
-        ))
-    .addStringOption(opt =>
-      opt.setName('server_id').setDescription('Server ID').setRequired(true))
-    .addIntegerOption(opt =>
-      opt.setName('reports').setDescription('Number of extra reports to add (Test only, default: 5)').setRequired(false));
-
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
-      body: [vibeCommand.toJSON(), progressCommand.toJSON(), adminCommand.toJSON()]
-    });
-    console.log('✅ Commands registered');
-  } catch (err) {
-    console.error('❌ Failed to register commands:', err);
-  }
-}
-
-// ============================================================
+// ============================================
 // BOT READY
-// ============================================================
+// ============================================
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log('');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  ✅ VIBE CHECK BOT IS ONLINE');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  ✅ VIBECHECK IS ONLINE');
   console.log(`  Bot: ${client.user.tag}`);
   console.log(`  Servers: ${client.guilds.cache.size}`);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
+  await checkMessageContentIntent(client);
   registerCommands();
 });
 
-// ============================================================
-// WELCOME MESSAGE ON JOIN
-// ============================================================
+// ============================================
+// WELCOME MESSAGE
+// ============================================
 
 client.on('guildCreate', async (guild) => {
-  console.log(`📥 Joined: ${guild.name}`);
   try {
-    const channel = guild.systemChannel ||
-      guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText &&
-        c.permissionsFor(guild.members.me)?.has('SendMessages')
-      );
-    if (!channel) return;
-
-    const embed = new EmbedBuilder()
-      .setColor(0xF97316)
-      .setTitle('👋 Vibe Check Bot has arrived!')
-      .setDescription(
-        'Use `/vibe` to check how friendly your community is.\n\n' +
-        '**New: analyze multiple channels in one report!**\n' +
-        '`/vibe channel:#general channel2:#gaming channel3:#off-topic`'
-      )
-      .addFields(
-        { name: '🎮 Low Sensitivity', value: 'Gaming/Adult servers', inline: true },
-        { name: '⚖️ Medium Sensitivity', value: 'General (default)', inline: true },
-        { name: '👶 High Sensitivity', value: 'Kids/Family servers', inline: true }
-      )
-      .setFooter({ text: 'How friendly is your community?' });
-
-    await channel.send({ embeds: [embed] });
-  } catch (err) {
-    console.error(`❌ guildCreate error for ${guild.name}:`, err.message);
+    console.log(`📥 Joined: ${guild.name}`);
+    const channel = guild.systemChannel || guild.channels.cache.find(c => 
+      c.type === ChannelType.GuildText && 
+      c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.SendMessages)
+    );
+    if (channel) {
+      const embed = new EmbedBuilder()
+        .setColor(0x22c55e)
+        .setTitle('👋 VibeCheck is here!')
+        .setDescription('Type `/vibe` to check your community.\n\n🎮 **Low** - Gaming\n⚖️ **Medium** - General\n👶 **High** - Kids')
+        .setFooter({ text: 'How friendly is your community?' });
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.error('guildCreate error:', error);
   }
 });
 
-client.on('guildDelete', (guild) => {
-  console.log(`📤 Removed from server: ${guild.name} (${guild.id}) — Members: ${guild.memberCount}`);
-});
+// ============================================
+// REPORT DESIGN SYSTEM
+// ============================================
 
-// ============================================================
+const REPORT_COLORS = {
+  excellent: 0x059669,
+  good: 0x0d9488,
+  moderate: 0x6b7280,
+  attention: 0xd97706,
+  concern: 0xb45309,
+  neutral: 0x4b5563,
+  accent: 0x6366f1
+};
+
+function getScoreBand(score) {
+  if (score >= 8) return { color: REPORT_COLORS.excellent, label: 'Healthy', description: 'Conversation patterns indicate a constructive environment.' };
+  if (score >= 6) return { color: REPORT_COLORS.good, label: 'Stable', description: 'Generally positive dynamics with some areas for attention.' };
+  if (score >= 4) return { color: REPORT_COLORS.moderate, label: 'Mixed', description: 'Varied interaction patterns observed across the sample.' };
+  if (score >= 2) return { color: REPORT_COLORS.attention, label: 'Elevated', description: 'Notable patterns may benefit from community guidance.' };
+  return { color: REPORT_COLORS.concern, label: 'Needs Review', description: 'Patterns suggest proactive moderation may be beneficial.' };
+}
+
+function getGrade(score) {
+  if (score >= 9) return { grade: 'A+', emoji: '◆', color: REPORT_COLORS.excellent, label: 'Exceptional' };
+  if (score >= 8) return { grade: 'A', emoji: '◆', color: REPORT_COLORS.excellent, label: 'Excellent' };
+  if (score >= 7) return { grade: 'B+', emoji: '◇', color: REPORT_COLORS.good, label: 'Great' };
+  if (score >= 6) return { grade: 'B', emoji: '◇', color: REPORT_COLORS.good, label: 'Good' };
+  if (score >= 5) return { grade: 'C', emoji: '○', color: REPORT_COLORS.moderate, label: 'Average' };
+  if (score >= 4) return { grade: 'D', emoji: '○', color: REPORT_COLORS.attention, label: 'Needs Work' };
+  return { grade: 'F', emoji: '●', color: REPORT_COLORS.concern, label: 'Critical' };
+}
+
+function generateToneChart(friendly, neutral, unfriendly) {
+  const total = friendly + neutral + unfriendly;
+  if (total === 0) return null;
+  const config = {
+    type: 'bar',
+    data: {
+      labels: [''],
+      datasets: [
+        { label: 'Positive', data: [friendly], backgroundColor: '#059669' },
+        { label: 'Neutral', data: [neutral], backgroundColor: '#9ca3af' },
+        { label: 'Negative', data: [unfriendly], backgroundColor: '#dc7b68' }
+      ]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, datalabels: { display: true, color: '#fff', font: { weight: 'bold', size: 14 }, formatter: (value) => value > 0 ? `${Math.round(value / total * 100)}%` : '' } },
+      scales: { x: { stacked: true, display: false, max: total }, y: { stacked: true, display: false } }
+    }
+  };
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=500&h=60&bkg=transparent`;
+}
+
+function generateBehaviorChart(toxicityTypes) {
+  if (!toxicityTypes || Object.keys(toxicityTypes).length === 0) return null;
+  const sorted = Object.entries(toxicityTypes).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const labels = sorted.map(([type]) => type);
+  const data = sorted.map(([, count]) => count);
+  const config = {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: '#6b7280', borderRadius: 4 }] },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: { legend: { display: false }, datalabels: { display: true, anchor: 'end', align: 'end', color: '#374151', font: { size: 12 } } },
+      scales: { x: { display: false, beginAtZero: true }, y: { grid: { display: false }, ticks: { color: '#374151', font: { size: 12 } } } }
+    }
+  };
+  const height = 40 + (sorted.length * 28);
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(config))}&w=450&h=${height}&bkg=transparent`;
+}
+
+function generateTrendChart(reports, type = 'score') {
+  if (!reports || reports.length < 2) return null;
+  const chronological = [...reports].reverse();
+  const labels = chronological.map(r => { try { return new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); } catch { return ''; } });
+  
+  if (type === 'score') {
+    const scores = chronological.map(r => clamp(parseFloat(r.score) || 0, 0, 10));
+    const flagged = chronological.map(r => Math.max(0, r.flagged_count || 0));
+    return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
+      type: 'line',
+      data: { labels, datasets: [
+        { label: 'Health Score', data: scores, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.1)', fill: true, tension: 0.4, yAxisID: 'y' },
+        { label: 'Flagged Messages', data: flagged, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: false, tension: 0.4, yAxisID: 'y1' }
+      ]},
+      options: { plugins: { title: { display: true, text: '📊 Community Health Trend', font: { size: 16 } } }, scales: { y: { type: 'linear', position: 'left', min: 0, max: 10, title: { display: true, text: 'Score' } }, y1: { type: 'linear', position: 'right', min: 0, title: { display: true, text: 'Flagged' }, grid: { drawOnChartArea: false } } } }
+    }))}&w=600&h=300&bkg=white`;
+  }
+  
+  if (type === 'sentiment') {
+    const friendly = chronological.map(r => { const total = (r.friendly || 0) + (r.neutral || 0) + (r.unfriendly || 0); return total > 0 ? Math.round((r.friendly / total) * 100) : 0; });
+    const unfriendly = chronological.map(r => { const total = (r.friendly || 0) + (r.neutral || 0) + (r.unfriendly || 0); return total > 0 ? Math.round((r.unfriendly / total) * 100) : 0; });
+    return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
+      type: 'line',
+      data: { labels, datasets: [
+        { label: 'Friendly %', data: friendly, borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.2)', fill: true, tension: 0.4 },
+        { label: 'Unfriendly %', data: unfriendly, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.2)', fill: true, tension: 0.4 }
+      ]},
+      options: { plugins: { title: { display: true, text: '💬 Sentiment Trend', font: { size: 16 } } }, scales: { y: { min: 0, max: 100, title: { display: true, text: 'Percentage' } } } }
+    }))}&w=600&h=250&bkg=white`;
+  }
+  return null;
+}
+
+function generateToxicityChart(toxicityData) {
+  if (!toxicityData || Object.keys(toxicityData).length === 0) return null;
+  const sorted = Object.entries(toxicityData).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const labels = sorted.map(([type]) => type);
+  const data = sorted.map(([, count]) => count);
+  const colors = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#14b8a6', '#3b82f6'];
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
+    type: 'doughnut',
+    data: { labels, datasets: [{ data, backgroundColor: colors.slice(0, data.length) }] },
+    options: { plugins: { title: { display: true, text: '⚠️ Toxicity Breakdown', font: { size: 16 } }, legend: { position: 'right' } } }
+  }))}&w=400&h=250&bkg=white`;
+}
+
+function generateChannelChart(channelStats) {
+  if (!channelStats || Object.keys(channelStats).length === 0) return null;
+  const sorted = Object.entries(channelStats).sort((a, b) => (b[1].totalScore / b[1].count) - (a[1].totalScore / a[1].count)).slice(0, 8);
+  const labels = sorted.map(([ch]) => `#${ch}`);
+  const scores = sorted.map(([, s]) => (s.totalScore / s.count).toFixed(1));
+  const colors = scores.map(s => { if (s >= 7) return '#22c55e'; if (s >= 5) return '#f59e0b'; return '#ef4444'; });
+  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify({
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Avg Score', data: scores, backgroundColor: colors }] },
+    options: { indexAxis: 'y', plugins: { title: { display: true, text: '📍 Channel Health Ranking', font: { size: 16 } } }, scales: { x: { min: 0, max: 10, title: { display: true, text: 'Score' } } } }
+  }))}&w=500&h=300&bkg=white`;
+}
+
+async function generateAIInsights(data) {
+  try {
+    const prompt = `You are a community health analyst. Based on this Discord server data, provide 3 specific, actionable insights to reduce toxicity.
+
+DATA:
+- Average Score: ${data.avgScore}/10
+- Score Trend: ${data.scoreTrend > 0 ? 'Improving' : data.scoreTrend < 0 ? 'Declining' : 'Stable'} (${data.scoreTrend > 0 ? '+' : ''}${data.scoreTrend})
+- Total Flagged Messages: ${data.totalFlagged}
+- Top Toxicity Types: ${data.topToxicity.join(', ') || 'None'}
+- Worst Channel: #${data.worstChannel?.name || 'N/A'} (${data.worstChannel?.score || 'N/A'}/10)
+- Best Channel: #${data.bestChannel?.name || 'N/A'} (${data.bestChannel?.score || 'N/A'}/10)
+- Total Reports: ${data.totalReports}
+- Friendly %: ${data.friendlyPct}%
+- Unfriendly %: ${data.unfriendlyPct}%
+
+Return ONLY a JSON array with 3 objects, each with "icon" (emoji), "title" (5 words max), and "tip" (15 words max):
+[{"icon":"💡","title":"Example Title","tip":"Specific actionable advice here."}]`;
+
+    const response = await openai.chat.completions.create({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], max_tokens: 300, temperature: 0.7 });
+    const text = response.choices[0].message.content;
+    const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    return JSON.parse(cleaned);
+  } catch (error) {
+    console.error('AI insights error:', error);
+    return [
+      { icon: '💡', title: 'Monitor Problem Channels', tip: 'Focus moderation on channels with lowest scores.' },
+      { icon: '🎯', title: 'Address Top Issues', tip: 'Create rules targeting your most common toxicity types.' },
+      { icon: '📈', title: 'Track Progress Weekly', tip: 'Run reports regularly to measure improvement.' }
+    ];
+  }
+}
+
+function canReadChannel(channel, guild) {
+  try {
+    const permissions = channel.permissionsFor(guild.members.me);
+    return permissions && permissions.has(PermissionFlagsBits.ViewChannel) && permissions.has(PermissionFlagsBits.ReadMessageHistory);
+  } catch (error) {
+    return false;
+  }
+}
+
+// ============================================
+// BUILD PROGRESS EMBEDS
+// ============================================
+
+async function buildProgressEmbeds(serverId, serverName, channelName, reports) {
+  if (!reports || reports.length === 0) return null;
+  
+  const embeds = [];
+  const chronological = [...reports].reverse();
+  
+  let firstDate = 'N/A', lastDate = 'N/A';
+  try {
+    firstDate = new Date(chronological[0].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    lastDate = new Date(chronological[chronological.length - 1].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch (e) {}
+  
+  const scores = chronological.map(r => clamp(parseFloat(r.score) || 0, 0, 10));
+  const firstScore = scores[0];
+  const lastScore = scores[scores.length - 1];
+  const avgScore = (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1);
+  const minScore = Math.min(...scores).toFixed(1);
+  const maxScore = Math.max(...scores).toFixed(1);
+  const scoreTrend = (lastScore - firstScore).toFixed(1);
+  
+  const gradeInfo = getGrade(parseFloat(avgScore));
+  
+  let totalFriendly = 0, totalNeutral = 0, totalUnfriendly = 0;
+  chronological.forEach(r => { totalFriendly += r.friendly || 0; totalNeutral += r.neutral || 0; totalUnfriendly += r.unfriendly || 0; });
+  const totalMessages = totalFriendly + totalNeutral + totalUnfriendly;
+  const friendlyPct = safePercentage(totalFriendly, totalMessages);
+  const neutralPct = safePercentage(totalNeutral, totalMessages);
+  const unfriendlyPct = safePercentage(totalUnfriendly, totalMessages);
+  
+  const flaggedCounts = chronological.map(r => Math.max(0, r.flagged_count || 0));
+  const totalFlagged = flaggedCounts.reduce((a, b) => a + b, 0);
+  const avgFlagged = (totalFlagged / chronological.length).toFixed(1);
+  
+  const channelStats = {};
+  chronological.forEach(r => {
+    if (!channelStats[r.channel_name]) channelStats[r.channel_name] = { count: 0, totalScore: 0, totalFlagged: 0, scores: [] };
+    channelStats[r.channel_name].count++;
+    channelStats[r.channel_name].totalScore += parseFloat(r.score) || 0;
+    channelStats[r.channel_name].totalFlagged += r.flagged_count || 0;
+    channelStats[r.channel_name].scores.push(parseFloat(r.score) || 0);
+  });
+  
+  const channelRanking = Object.entries(channelStats).map(([name, s]) => ({ name, avgScore: (s.totalScore / s.count).toFixed(1), count: s.count, flagged: s.totalFlagged })).sort((a, b) => b.avgScore - a.avgScore);
+  const bestChannel = channelRanking[0];
+  const worstChannel = channelRanking[channelRanking.length - 1];
+  
+  const allToxicity = {};
+  chronological.forEach(r => {
+    if (r.toxicity_types) {
+      try {
+        const types = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+        Object.entries(types).forEach(([type, count]) => { allToxicity[type] = (allToxicity[type] || 0) + count; });
+      } catch (e) {}
+    }
+  });
+  const sortedToxicity = Object.entries(allToxicity).sort((a, b) => b[1] - a[1]);
+  const totalToxicityCount = sortedToxicity.reduce((sum, [, count]) => sum + count, 0);
+  
+  const dayStats = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
+  chronological.forEach(r => { try { const day = new Date(r.created_at).getDay(); dayStats[day].push(parseFloat(r.score) || 0); } catch (e) {} });
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const dayAverages = Object.entries(dayStats).filter(([, scores]) => scores.length > 0).map(([day, scores]) => ({ day: dayNames[day], avg: (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1), count: scores.length })).sort((a, b) => b.avg - a.avg);
+  
+  // EMBED 1: OVERVIEW
+  const overviewEmbed = new EmbedBuilder()
+    .setColor(gradeInfo.color)
+    .setTitle(`${gradeInfo.emoji} Community Health Report`)
+    .setDescription(`**${serverName}**${channelName ? ` · #${channelName}` : ''}\n📅 ${firstDate} → ${lastDate} · ${reports.length} reports`)
+    .addFields(
+      { name: '🎯 Overall Grade', value: `\`\`\`\n   ${gradeInfo.grade}   \n${gradeInfo.label}\n\`\`\``, inline: true },
+      { name: '📊 Average Score', value: `\`\`\`\n ${avgScore}/10 \n\`\`\``, inline: true },
+      { name: `${scoreTrend >= 0 ? '📈' : '📉'} Trend`, value: `\`\`\`\n${scoreTrend >= 0 ? '+' : ''}${scoreTrend} \n\`\`\``, inline: true }
+    )
+    .addFields(
+      { name: '📉 Score Range', value: `Low: **${minScore}** · High: **${maxScore}**`, inline: true },
+      { name: '💬 Messages Analyzed', value: `**${totalMessages.toLocaleString()}** total`, inline: true },
+      { name: '🚩 Flagged Messages', value: `**${totalFlagged}** (${avgFlagged}/report avg)`, inline: true }
+    );
+  const trendChart = generateTrendChart(reports, 'score');
+  if (trendChart) overviewEmbed.setImage(trendChart);
+  embeds.push(overviewEmbed);
+  
+  // EMBED 2: SENTIMENT
+  const sentimentEmbed = new EmbedBuilder()
+    .setColor(0x3b82f6)
+    .setTitle('💬 Sentiment Analysis')
+    .setDescription(`**What this shows:** The emotional tone across all ${totalMessages.toLocaleString()} messages analyzed.`)
+    .addFields(
+      { name: '✅ Positive', value: `**${friendlyPct}%**\n${totalFriendly.toLocaleString()} msgs`, inline: true },
+      { name: '➖ Neutral', value: `**${neutralPct}%**\n${totalNeutral.toLocaleString()} msgs`, inline: true },
+      { name: '❌ Negative', value: `**${unfriendlyPct}%**\n${totalUnfriendly.toLocaleString()} msgs`, inline: true }
+    );
+  const friendlyBar = Math.round(friendlyPct / 5);
+  const neutralBar = Math.round(neutralPct / 5);
+  const unfriendlyBar = Math.round(unfriendlyPct / 5);
+  const visualBar = `\`${'▓'.repeat(friendlyBar)}${'░'.repeat(neutralBar)}${'█'.repeat(unfriendlyBar)}\``;
+  sentimentEmbed.addFields({ name: 'Distribution Chart', value: `${visualBar}\n\`▓\` = Positive  \`░\` = Neutral  \`█\` = Negative`, inline: false });
+  const sentimentChart = generateTrendChart(reports, 'sentiment');
+  if (sentimentChart) sentimentEmbed.setImage(sentimentChart);
+  embeds.push(sentimentEmbed);
+  
+  // EMBED 3: BEHAVIOR PATTERNS
+  const toxicityEmbed = new EmbedBuilder()
+    .setColor(0xf59e0b)
+    .setTitle('📋 Behavior Patterns')
+    .setDescription(totalToxicityCount > 0 ? `**What this shows:** ${totalToxicityCount} behaviors identified as coaching opportunities across all reports.` : '🌟 **Excellent!** No concerning behaviors detected.');
+  if (sortedToxicity.length > 0) {
+    const typeDescriptions = { 'Insults': 'Personal attacks', 'Harassment': 'Repeated targeting', 'Profanity': 'Strong language', 'Bullying': 'Intimidation', 'Threats': 'Harm implications', 'Negativity': 'Excessive pessimism', 'Spam': 'Repetitive content', 'Racism': 'Race discrimination', 'Xenophobia': 'Outsider hostility', 'Homophobia': 'LGBTQ+ hostility' };
+    const topIssues = sortedToxicity.slice(0, 6).map(([type, count]) => { const pct = safePercentage(count, totalToxicityCount); const barLength = Math.max(1, Math.round(pct / 10)); const bar = '█'.repeat(barLength) + '░'.repeat(10 - barLength); const desc = typeDescriptions[type] || ''; return `\`${bar}\` **${type}** (${count}) ${pct}%${desc ? ` - _${desc}_` : ''}`; }).join('\n');
+    toxicityEmbed.addFields({ name: '🎯 Focus Areas', value: topIssues, inline: false });
+    const severeTypes = ['Threats', 'Harassment', 'Racism', 'Xenophobia', 'Homophobia'];
+    const severeCount = sortedToxicity.filter(([type]) => severeTypes.some(s => type.toLowerCase().includes(s.toLowerCase()))).reduce((sum, [, count]) => sum + count, 0);
+    if (severeCount > 0) toxicityEmbed.addFields({ name: '🚨 Severe Issues', value: `**${severeCount}** high-severity incidents`, inline: false });
+  }
+  const toxicityChart = generateToxicityChart(allToxicity);
+  if (toxicityChart) toxicityEmbed.setImage(toxicityChart);
+  embeds.push(toxicityEmbed);
+  
+  // EMBED 4: CHANNEL ANALYSIS
+  if (Object.keys(channelStats).length > 1) {
+    const channelEmbed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('📍 Channel Analysis').setDescription(`Health comparison across ${Object.keys(channelStats).length} channels`);
+    if (bestChannel) channelEmbed.addFields({ name: '🏆 Healthiest Channel', value: `**#${bestChannel.name}**\nScore: ${bestChannel.avgScore}/10 · ${bestChannel.count} reports · ${bestChannel.flagged} flagged`, inline: false });
+    if (worstChannel && worstChannel.name !== bestChannel?.name) channelEmbed.addFields({ name: '⚠️ Needs Attention', value: `**#${worstChannel.name}**\nScore: ${worstChannel.avgScore}/10 · ${worstChannel.count} reports · ${worstChannel.flagged} flagged`, inline: false });
+    const rankingText = channelRanking.slice(0, 8).map((ch, i) => { const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`; const scoreLabel = ch.avgScore >= 7 ? '✓' : ch.avgScore >= 5 ? '~' : '!'; return `${medal} \`${scoreLabel}\` **#${ch.name}** · ${ch.avgScore}/10`; }).join('\n');
+    channelEmbed.addFields({ name: '📊 Full Ranking', value: `${rankingText}\n\n\`✓\` = Healthy (7+)  \`~\` = Average (5-6)  \`!\` = Needs Work (<5)`, inline: false });
+    const channelChart = generateChannelChart(channelStats);
+    if (channelChart) channelEmbed.setImage(channelChart);
+    embeds.push(channelEmbed);
+  }
+  
+  // EMBED 5: PATTERNS & TIMING
+  if (dayAverages.length > 1) {
+    const patternEmbed = new EmbedBuilder().setColor(0x14b8a6).setTitle('🕐 Behavioral Patterns').setDescription('When does toxicity peak?');
+    const bestDay = dayAverages[0];
+    const worstDay = dayAverages[dayAverages.length - 1];
+    patternEmbed.addFields(
+      { name: '✨ Best Day', value: `**${bestDay.day}**\n${bestDay.avg}/10 avg`, inline: true },
+      { name: '⚠️ Watch Out', value: `**${worstDay.day}**\n${worstDay.avg}/10 avg`, inline: true },
+      { name: '📈 Difference', value: `**${(bestDay.avg - worstDay.avg).toFixed(1)}** points`, inline: true }
+    );
+    const dayBreakdown = dayAverages.map(d => { const symbol = d.avg >= 7 ? '✓' : d.avg >= 5 ? '~' : '!'; return `\`${symbol}\` ${d.day.slice(0, 3)}: ${d.avg}`; }).join(' · ');
+    patternEmbed.addFields({ name: 'Weekly Overview', value: `${dayBreakdown}\n\n\`✓\` = Healthy  \`~\` = Average  \`!\` = Needs Work`, inline: false });
+    embeds.push(patternEmbed);
+  }
+  
+  // EMBED 6: AI INSIGHTS
+  const aiData = { avgScore, scoreTrend: parseFloat(scoreTrend), totalFlagged, topToxicity: sortedToxicity.slice(0, 3).map(([type]) => type), worstChannel: worstChannel ? { name: worstChannel.name, score: worstChannel.avgScore } : null, bestChannel: bestChannel ? { name: bestChannel.name, score: bestChannel.avgScore } : null, totalReports: reports.length, friendlyPct, unfriendlyPct };
+  const insights = await generateAIInsights(aiData);
+  const insightsEmbed = new EmbedBuilder().setColor(0xf59e0b).setTitle('💡 AI Recommendations').setDescription('Personalized action items to improve your community');
+  insights.forEach((insight) => { insightsEmbed.addFields({ name: `${insight.icon} ${insight.title}`, value: insight.tip, inline: false }); });
+  let quickWins = [];
+  if (worstChannel && parseFloat(worstChannel.avgScore) < 5) quickWins.push(`Focus moderation on #${worstChannel.name}`);
+  if (sortedToxicity.length > 0) quickWins.push(`Create rules addressing ${sortedToxicity[0][0].toLowerCase()}`);
+  if (unfriendlyPct > 20) quickWins.push('Consider adding positive reinforcement bot');
+  if (quickWins.length > 0) insightsEmbed.addFields({ name: '🎯 Quick Wins', value: quickWins.map(w => `• ${w}`).join('\n'), inline: false });
+  insightsEmbed.setFooter({ text: '🔄 Run /vibe regularly to track improvement!' });
+  embeds.push(insightsEmbed);
+  
+  return embeds;
+}
+
+async function buildProgressEmbed(serverId, serverName, channelName, reports) {
+  const embeds = await buildProgressEmbeds(serverId, serverName, channelName, reports);
+  return embeds ? embeds[0] : null;
+}
+
+// ============================================
+// RUN VIBE ANALYSIS
+// ============================================
+
+async function runVibeAnalysis(interaction, options) {
+  const { channel, visibility, sensitivity, timeframe, messageCount, startDate, endDate } = options;
+  const serverId = interaction.guildId;
+  const serverName = interaction.guild.name;
+  const userId = interaction.user.id;
+  const approved = await isApproved(serverId);
+  const isPrivate = visibility === 'private';
+  
+  let actualMessageCount = messageCount;
+  let actualTimeframe = timeframe;
+  
+  if (!approved) {
+    if (actualMessageCount > CONFIG.FREE_MAX_MESSAGES) actualMessageCount = CONFIG.FREE_MAX_MESSAGES;
+    if (actualTimeframe === '30d') actualTimeframe = '7d';
+  }
+
+  setCooldown(serverId, userId);
+  recordServerRequest(serverId);
+  
+  const processingStartTime = Date.now();
+
+  try {
+    if (!canReadChannel(channel, interaction.guild)) {
+      return interaction.editReply('❌ I don\'t have permission to read that channel.');
+    }
+
+    await interaction.editReply('📡 **Step 1/3:** Fetching messages from channel...');
+
+    let cutoffTime = 0, afterTime = null, beforeTime = null;
+
+    if (startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) return interaction.editReply('❌ Invalid date. Use YYYY-MM-DD');
+      if (start > end) return interaction.editReply('❌ Start must be before end.');
+      afterTime = start.getTime();
+      beforeTime = end.getTime() + 86400000 - 1;
+      actualTimeframe = `${startDate} to ${endDate}`;
+    } else {
+      const timeMs = { '1h': 3600000, '12h': 43200000, '24h': 86400000, '3d': 259200000, '7d': 604800000, '30d': 2592000000 }[actualTimeframe] || 86400000;
+      cutoffTime = Date.now() - timeMs;
+    }
+
+    let allMessages = [];
+    let lastId;
+    let fetchAttempts = 0;
+    let totalFetched = 0;
+    let botMessages = 0;
+    let emptyMessages = 0;
+    let outsideTimeframe = 0;
+
+    while (allMessages.length < actualMessageCount && fetchAttempts < 20) {
+      fetchAttempts++;
+      if (fetchAttempts % 5 === 0 || fetchAttempts === 1) {
+        await interaction.editReply(`📡 **Step 1/3:** Fetching messages... (${allMessages.length} found)`);
+      }
+      try {
+        const fetchOptions = { limit: 100 };
+        if (lastId) fetchOptions.before = lastId;
+        const fetched = await channel.messages.fetch(fetchOptions);
+        if (fetched.size === 0) break;
+        totalFetched += fetched.size;
+        for (const m of fetched.values()) {
+          if (m.author.bot) { botMessages++; continue; }
+          if (!m.content || m.content.trim().length === 0) { emptyMessages++; continue; }
+          let inTimeframe = true;
+          if (afterTime && beforeTime) inTimeframe = m.createdTimestamp >= afterTime && m.createdTimestamp <= beforeTime;
+          else if (cutoffTime) inTimeframe = m.createdTimestamp > cutoffTime;
+          if (!inTimeframe) { outsideTimeframe++; continue; }
+          allMessages.push(m.content);
+        }
+        lastId = fetched.last().id;
+        const lastTimestamp = fetched.last().createdTimestamp;
+        if ((afterTime && lastTimestamp < afterTime) || (!afterTime && cutoffTime && lastTimestamp < cutoffTime)) break;
+      } catch (fetchError) {
+        console.error('Message fetch error:', fetchError);
+        break;
+      }
+    }
+
+    allMessages = allMessages.slice(0, actualMessageCount);
+
+    if (allMessages.length < 1) {
+      let reason = '';
+      if (totalFetched === 0) reason = 'No messages exist in this channel.';
+      else if (botMessages > 0 && botMessages === totalFetched) reason = `Found ${botMessages} messages, but all are from bots.`;
+      else if (outsideTimeframe > 0) reason = `Found ${totalFetched} messages, but none within the ${actualTimeframe} timeframe.`;
+      else if (emptyMessages > 0) reason = `Found ${totalFetched} messages, but all are empty or attachments-only.`;
+      else reason = 'Try a longer timeframe or different channel.';
+      return interaction.editReply(`❌ No analyzable messages found.\n\n${reason}`);
+    }
+
+    const usageBefore = await getUsage(serverId);
+    const isFirstReport = usageBefore.reports_used === 0;
+
+    await interaction.editReply(`🔍 **Step 2/3:** Analyzing ${allMessages.length} messages with AI...`);
+
+    const analysis = await analyzeMessages(allMessages, channel.name, actualTimeframe, sensitivity);
+    await useReport(serverId);
+    const remaining = await getReportsRemaining(serverId, interaction.user.id);
+    
+    if (isFirstReport && !approved && interaction.user.id !== CONFIG.OWNER_ID) {
+      await sendFreeTrialStartEmail(serverName, serverId, interaction.user.username, interaction.user.id);
+    }
+    if (!approved && remaining === 0 && interaction.user.id !== CONFIG.OWNER_ID) {
+      await sendTrialEndedEmail(serverName, serverId, interaction.user.username);
+    }
+
+    await interaction.editReply('📊 **Step 3/3:** Building your report...');
+
+    await saveReport({ serverId, channelName: channel.name, score: analysis.friendlinessScore.toFixed(1), sentiment: analysis.sentiment, flaggedMessages: analysis.flaggedMessages, toxicityTypes: analysis.toxicityTypes, sensitivity, timeframe: actualTimeframe });
+
+    // Research logging (privacy-safe)
+    const processingEndTime = Date.now();
+    const inputTokens = analysis._usage?.input_tokens || 0;
+    const outputTokens = analysis._usage?.output_tokens || 0;
+    const costUsd = calculateCost(inputTokens, outputTokens);
+    
+    await logResearchData({
+      serverId,
+      userId: interaction.user.id,
+      channelId: channel.id,
+      messagesAnalyzed: allMessages.length,
+      timeframe: actualTimeframe,
+      sensitivity,
+      visibility,
+      isPro: approved,
+      score: parseFloat(analysis.friendlinessScore.toFixed(1)),
+      friendly: analysis.sentiment.friendly || 0,
+      neutral: analysis.sentiment.neutral || 0,
+      unfriendly: analysis.sentiment.unfriendly || 0,
+      flaggedCount: analysis.flaggedMessages?.length || 0,
+      toxicityTypes: analysis.toxicityTypes || {},
+      processingTimeMs: processingEndTime - processingStartTime,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      success: true
+    });
+
+    await sendReportEmail({ serverName, serverId, channelName: channel.name, messageCount: allMessages.length, score: analysis.friendlinessScore.toFixed(1), sentiment: analysis.sentiment, flaggedMessages: analysis.flaggedMessages, toxicityTypes: analysis.toxicityTypes, recommendation: analysis.recommendation, remaining, isPro: approved, sensitivity, timeframe: actualTimeframe, visibility });
+
+    const score = clamp(analysis.friendlinessScore, 0, 10);
+    const gradeInfo = getGrade(score);
+    const total = (analysis.sentiment.friendly || 0) + (analysis.sentiment.neutral || 0) + (analysis.sentiment.unfriendly || 0);
+    const friendlyPct = safePercentage(analysis.sentiment.friendly, total);
+    const neutralPct = safePercentage(analysis.sentiment.neutral, total);
+    const unfriendlyPct = safePercentage(analysis.sentiment.unfriendly, total);
+    const timeframeLabel = { '1h': '1 hour', '12h': '12 hours', '24h': '24 hours', '3d': '3 days', '7d': '7 days', '30d': '30 days' }[actualTimeframe] || actualTimeframe;
+
+    const embeds = [];
+    const scoreBand = getScoreBand(score);
+
+    // EMBED 1: HEALTH SUMMARY
+    const healthEmbed = new EmbedBuilder()
+      .setColor(scoreBand.color)
+      .setTitle('Community Health Summary')
+      .setDescription(`\n**${score.toFixed(1)}** / 10\n\u200b\n*${scoreBand.label}*\n\u200b`)
+      .addFields({ name: '\u200b', value: scoreBand.description, inline: false })
+      .setFooter({ text: `Analysis reflects the selected ${timeframeLabel} timeframe only` });
+    embeds.push(healthEmbed);
+
+    // EMBED 2: TONE
+    const toneChartUrl = generateToneChart(analysis.sentiment.friendly || 0, analysis.sentiment.neutral || 0, analysis.sentiment.unfriendly || 0);
+    const toneEmbed = new EmbedBuilder()
+      .setColor(REPORT_COLORS.neutral)
+      .setTitle('Conversation Tone')
+      .addFields(
+        { name: 'Positive', value: `${friendlyPct}%`, inline: true },
+        { name: 'Neutral', value: `${neutralPct}%`, inline: true },
+        { name: 'Negative', value: `${unfriendlyPct}%`, inline: true }
+      )
+      .setFooter({ text: 'Mixed tone is normal in active communities' });
+    if (toneChartUrl) toneEmbed.setImage(toneChartUrl);
+    embeds.push(toneEmbed);
+
+    // EMBED 3: BEHAVIOR PATTERNS
+    if (analysis.toxicityTypes && Object.keys(analysis.toxicityTypes).length > 0) {
+      const sortedTypes = Object.entries(analysis.toxicityTypes).sort((a, b) => b[1] - a[1]);
+      const totalPatterns = sortedTypes.reduce((sum, [, count]) => sum + count, 0);
+      const behaviorChartUrl = generateBehaviorChart(analysis.toxicityTypes);
+      let patternList = '';
+      for (const [type, count] of sortedTypes.slice(0, 5)) patternList += `**${type}**  ·  ${count}\n`;
+      const behaviorEmbed = new EmbedBuilder()
+        .setColor(REPORT_COLORS.neutral)
+        .setTitle('Behavior Patterns Observed')
+        .setDescription(`${totalPatterns} pattern${totalPatterns !== 1 ? 's' : ''} identified`)
+        .addFields({ name: 'By Frequency', value: patternList.trim() || 'None observed', inline: false })
+        .setFooter({ text: 'Counts reflect frequency, not severity' });
+      if (behaviorChartUrl) behaviorEmbed.setImage(behaviorChartUrl);
+      embeds.push(behaviorEmbed);
+    }
+
+    // EMBED 4: FLAGGED MESSAGES
+    if (analysis.flaggedMessages?.length > 0) {
+      const sortedFlagged = [...analysis.flaggedMessages].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, 5);
+      const canViewDetails = interaction.member.permissions.has(PermissionFlagsBits.ManageMessages) || interaction.user.id === CONFIG.OWNER_ID;
+      const flaggedEmbed = new EmbedBuilder().setColor(REPORT_COLORS.neutral).setTitle('Flagged Message Highlights').setDescription(`${analysis.flaggedMessages.length} message${analysis.flaggedMessages.length !== 1 ? 's' : ''} flagged for review`);
+      
+      if (isPrivate && canViewDetails) {
+        let messageList = '';
+        for (const m of sortedFlagged) {
+          const sev = (m.severity || 0);
+          const sevMarker = sev >= 7 ? '●' : sev >= 5 ? '◐' : '○';
+          const type = m.type || 'Unclassified';
+          const text = (m.text || '').slice(0, 50);
+          const ellipsis = (m.text || '').length > 50 ? '…' : '';
+          const line = `${sevMarker}  **${type}**\n\`${text}${ellipsis}\`\n\n`;
+          if ((messageList + line).length > 900) break;
+          messageList += line;
+        }
+        flaggedEmbed.addFields({ name: 'Top by Severity', value: messageList.trim() || 'None', inline: false });
+        flaggedEmbed.setFooter({ text: analysis.flaggedMessages.length > 5 ? `Showing 5 of ${analysis.flaggedMessages.length} · ● High  ◐ Medium  ○ Low` : '● High  ◐ Medium  ○ Low severity' });
+      } else if (!canViewDetails) {
+        flaggedEmbed.addFields({ name: 'Access Restricted', value: 'Flagged content details are visible to moderators with **Manage Messages** permission only.', inline: false });
+        flaggedEmbed.setFooter({ text: 'Contact a server moderator for details' });
+      } else {
+        const typeCounts = {};
+        for (const m of analysis.flaggedMessages) { const type = m.type || 'Other'; typeCounts[type] = (typeCounts[type] || 0) + 1; }
+        const severityCounts = { high: 0, medium: 0, low: 0 };
+        for (const m of analysis.flaggedMessages) { const sev = m.severity || 0; if (sev >= 7) severityCounts.high++; else if (sev >= 5) severityCounts.medium++; else severityCounts.low++; }
+        const typeList = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([type, count]) => `**${type}**  ·  ${count}`).join('\n');
+        flaggedEmbed.addFields({ name: 'By Type', value: typeList || 'None', inline: true }, { name: 'By Severity', value: `● High: ${severityCounts.high}\n◐ Medium: ${severityCounts.medium}\n○ Low: ${severityCounts.low}`, inline: true });
+        flaggedEmbed.setFooter({ text: 'Message text hidden in public mode · Use /vibe visibility:private for details' });
+      }
+      embeds.push(flaggedEmbed);
+    }
+
+    // EMBED 5: CONTEXT
+    const sensitivityLabels = { low: 'Relaxed (gaming/adult communities)', medium: 'Standard (general communities)', high: 'Strict (family/kids communities)' };
+    const contextEmbed = new EmbedBuilder()
+      .setColor(REPORT_COLORS.accent)
+      .setTitle('Analysis Context')
+      .addFields(
+        { name: 'Sample Size', value: `${allMessages.length.toLocaleString()} messages`, inline: true },
+        { name: 'Timeframe', value: timeframeLabel, inline: true },
+        { name: 'Channel', value: `#${channel.name}`, inline: true },
+        { name: 'Sensitivity', value: sensitivityLabels[sensitivity] || 'Standard', inline: false },
+        { name: 'Data Handling', value: 'Message text is processed by AI to compute aggregates. Only summary metrics are stored.', inline: false }
+      )
+      .setFooter({ text: 'Results depend on selected scope and sensitivity settings' });
+    embeds.push(contextEmbed);
+
+    // EMBED 6: NEXT STEPS
+    const progressUsed = await getProgressUsage(serverId);
+    const progressLimit = approved ? CONFIG.PRO_PROGRESS_REPORTS : CONFIG.FREE_PROGRESS_REPORTS;
+    const progressRemaining = Math.max(0, progressLimit - progressUsed);
+    const actions = [];
+    if (score >= 8) { actions.push('Continue current moderation practices'); actions.push('Consider recognizing positive contributors'); }
+    else if (score >= 6) { actions.push('Review flagged messages when convenient'); actions.push('Monitor patterns over the coming week'); }
+    else if (score >= 4) { actions.push('Review community guidelines with members'); actions.push('Address top behavior pattern first'); actions.push('Schedule a follow-up check in 3-5 days'); }
+    else { actions.push('Prioritize review of high-severity flags'); actions.push('Consider temporary channel-specific rules'); actions.push('Schedule daily monitoring this week'); }
+    if (actions.length < 4) actions.push('Use /vibe-progress to track trends');
+    const actionList = actions.slice(0, 4).map(a => `→  ${a}`).join('\n');
+    const nextStepsEmbed = new EmbedBuilder()
+      .setColor(REPORT_COLORS.good)
+      .setTitle('Recommended Next Steps')
+      .setDescription(analysis.recommendation ? `*${analysis.recommendation}*` : null)
+      .addFields({ name: 'Suggested Actions', value: actionList, inline: false });
+    const isOwner = interaction.user.id === CONFIG.OWNER_ID;
+    const planLabel = isOwner ? 'Owner' : (approved ? 'Pro' : 'Free');
+    const reportsRemText = isOwner ? '∞' : remaining;
+    const progressRemText = isOwner ? '∞' : progressRemaining;
+    nextStepsEmbed.setFooter({ text: `${planLabel} · ${reportsRemText} reports remaining · ${progressRemText} progress remaining\nAI analysis is not a substitute for human moderation` });
+    embeds.push(nextStepsEmbed);
+
+    // BUTTONS
+    let buttons;
+    if (interaction.user.id === CONFIG.OWNER_ID || approved) {
+      buttons = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`progress_${serverId}`.slice(0, 100)).setLabel('📈 View Progress').setStyle(ButtonStyle.Primary));
+    } else {
+      buttons = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99 (Save 17%)' });
+    }
+
+    await interaction.editReply({ embeds: embeds.slice(0, 10), components: [buttons] });
+
+    // MILESTONE NOTIFICATIONS
+    const totalReports = await getTotalReports(serverId);
+    const milestones = [5, 10, 20, 30];
+    if (milestones.includes(totalReports) && !approved && interaction.user.id !== CONFIG.OWNER_ID) {
+      const checkEmbed = new EmbedBuilder().setColor(0x22c55e).setTitle(`🎉 Milestone: ${totalReports} reports!`).setDescription(`You've run **${totalReports}** reports!\n\nSubscribe to track your progress over time.`);
+      const progressBtn = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+      await interaction.followUp({ embeds: [checkEmbed], components: [progressBtn], ephemeral: true });
+    }
+
+    if (!approved && remaining <= 2 && remaining > 0 && interaction.user.id !== CONFIG.OWNER_ID) {
+      const warningEmbed = new EmbedBuilder().setColor(0xf59e0b).setDescription(`⚠️ Only **${remaining}** free report${remaining === 1 ? '' : 's'} left!\n\nSubscribe to continue using VibeCheck.`);
+      const upgradeBtn = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+      await interaction.followUp({ embeds: [warningEmbed], components: [upgradeBtn], ephemeral: true });
+    }
+    
+    if (approved && interaction.user.id !== CONFIG.OWNER_ID) {
+      const subStatus = await getSubscriptionStatus(serverId);
+      if (subStatus.daysLeft <= 7 && subStatus.daysLeft > 0) {
+        const expiryEmbed = new EmbedBuilder().setColor(0xf59e0b).setTitle('⏰ Subscription Expiring Soon').setDescription(`Your Pro subscription expires in **${subStatus.daysLeft} day${subStatus.daysLeft === 1 ? '' : 's'}**!`);
+        const renewBtn = createSubscriptionButtons({ monthlyLabel: '🔄 Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+        await interaction.followUp({ embeds: [expiryEmbed], components: [renewBtn], ephemeral: true });
+      }
+    }
+
+  } catch (error) {
+    console.error('Analysis error:', error);
+    
+    // Log failed research attempt
+    const processingEndTime = Date.now();
+    await logResearchData({
+      serverId,
+      userId: interaction.user.id,
+      channelId: channel.id,
+      messagesAnalyzed: 0,
+      timeframe: actualTimeframe,
+      sensitivity,
+      visibility,
+      isPro: approved,
+      score: null,
+      friendly: 0,
+      neutral: 0,
+      unfriendly: 0,
+      flaggedCount: 0,
+      toxicityTypes: {},
+      processingTimeMs: processingEndTime - processingStartTime,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      success: false,
+      errorMessage: error.message?.slice(0, 500)
+    });
+    
+    await interaction.editReply('❌ Something went wrong. Try again.');
+  }
+}
+
+// ============================================
 // INTERACTION HANDLER
-// ============================================================
+// ============================================
 
 client.on('interactionCreate', async (interaction) => {
-
-  // ── Button: View Progress ──────────────────────────────
-  if (interaction.isButton() && interaction.customId === 'view_progress') {
-    await handleProgressCommand(interaction, '10', []);
-    return;
+  
+  // MODAL SUBMISSIONS
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'custom_reports_modal') {
+      const countStr = interaction.fields.getTextInputValue('report_count');
+      const count = parseInt(countStr);
+      if (isNaN(count) || count < 1 || count > 100) {
+        return interaction.reply({ content: '❌ Please enter a number between 1 and 100.\n\n**Run `/vibe-progress` again to retry.**', ephemeral: true });
+      }
+      const pending = consumePendingCommand(pendingProgressCommands, interaction.user.id);
+      if (!pending) return interaction.reply({ content: '❌ Session expired. Please run `/vibe-progress` again.', ephemeral: true });
+      
+      const canUseProgress = await canUseProgressReport(pending.serverId, interaction.user.id);
+      if (!canUseProgress) {
+        const approved = await isApproved(pending.serverId);
+        if (approved) {
+          const usage = await getUsage(pending.serverId);
+          const monthStart = new Date(usage.month_start);
+          const daysUntilReset = Math.ceil(30 - ((new Date() - monthStart) / (1000 * 60 * 60 * 24)));
+          const embed = new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Progress Limit Reached').setDescription(`You've used all **${CONFIG.PRO_PROGRESS_REPORTS} progress reports** this month!\n\nYour progress reports reset in **${daysUntilReset} days**.`);
+          return interaction.reply({ embeds: [embed], ephemeral: true });
+        } else {
+          const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('📈 Progress Reports').setDescription(`You've used your **${CONFIG.FREE_PROGRESS_REPORTS}** free demo!\n\n**Subscribe to unlock:**\n\n✓ 30 reports per month\n✓ ${CONFIG.PRO_PROGRESS_REPORTS} progress reports per month`);
+          const buttons = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+          return interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+        }
+      }
+      
+      await interaction.deferReply({ ephemeral: true });
+      const reports = await getReportHistory(pending.serverId, pending.channelName, count, null);
+      if (!reports || reports.length === 0) return interaction.editReply('❌ No reports found. Run `/vibe` first!');
+      const embeds = await buildProgressEmbeds(pending.serverId, pending.serverName, pending.channelName, reports);
+      if (!embeds || embeds.length === 0) return interaction.editReply('❌ No reports found.');
+      const hasPaid = await hasProgressAccess(pending.serverId);
+      if (interaction.user.id !== CONFIG.OWNER_ID && !hasPaid) await useProgressReport(pending.serverId);
+      await sendProgressReportEmail(pending.serverName, pending.serverId, pending.channelName, reports, interaction.user.username);
+      return interaction.editReply({ embeds: embeds.slice(0, 10) });
+    }
+  }
+  
+  // BUTTON HANDLERS
+  if (interaction.isButton()) {
+    const customId = interaction.customId;
+    try {
+      if (customId.startsWith('approve_')) {
+        const serverId = customId.replace('approve_', '');
+        const request = await getApprovalRequest(serverId);
+        if (request) {
+          await approveServer(serverId, request.server_name);
+          await interaction.update({ embeds: [new EmbedBuilder().setColor(0x22c55e).setTitle('✅ Approved').setDescription(`**${request.server_name}** - 30 reports/month`)], components: [] });
+        }
+        return;
+      }
+      if (customId.startsWith('deny_')) {
+        const serverId = customId.replace('deny_', '');
+        await updateApprovalStatus(serverId, 'denied');
+        await interaction.update({ embeds: [new EmbedBuilder().setColor(0xef4444).setTitle('❌ Denied').setDescription('User will see Stripe link.')], components: [] });
+        return;
+      }
+      if (customId.startsWith('progress_')) {
+        const serverId = customId.replace('progress_', '');
+        const serverName = interaction.guild?.name || 'Unknown';
+        const canUseProgress = await canUseProgressReport(serverId, interaction.user.id);
+        if (!canUseProgress) {
+          const approved = await isApproved(serverId);
+          if (approved) {
+            const usage = await getUsage(serverId);
+            const monthStart = new Date(usage.month_start);
+            const daysUntilReset = Math.ceil(30 - ((new Date() - monthStart) / (1000 * 60 * 60 * 24)));
+            const embed = new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Progress Limit Reached').setDescription(`You've used all **${CONFIG.PRO_PROGRESS_REPORTS} progress reports** this month!\n\nYour progress reports reset in **${daysUntilReset} days**.`);
+            return interaction.reply({ embeds: [embed], ephemeral: true });
+          } else {
+            const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('📈 Progress Reports').setDescription(`You've used your **${CONFIG.FREE_PROGRESS_REPORTS}** free demo!\n\n**Subscribe to unlock:**\n\n✓ 30 reports per month\n✓ ${CONFIG.PRO_PROGRESS_REPORTS} progress reports per month`);
+            const buttons = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+            return interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+          }
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const reports = await getReportHistory(serverId, null, 10, null);
+        const embeds = await buildProgressEmbeds(serverId, serverName, null, reports);
+        if (!embeds || embeds.length === 0) return interaction.editReply('❌ No reports found.');
+        const hasPaid = await hasProgressAccess(serverId);
+        if (interaction.user.id !== CONFIG.OWNER_ID && !hasPaid) await useProgressReport(serverId);
+        await sendProgressReportEmail(serverName, serverId, null, reports, interaction.user.username);
+        return interaction.editReply({ embeds: embeds.slice(0, 10) });
+      }
+    } catch (buttonError) {
+      console.error('Button handler error:', buttonError);
+      try { if (!interaction.replied && !interaction.deferred) await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true }); } catch (e) {}
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;
 
-  // ── /vibe ──────────────────────────────────────────────
-  if (interaction.commandName === 'vibe') {
-    await handleVibeCommand(interaction);
-    return;
-  }
-
-  // ── /vibe-progress ─────────────────────────────────────
-  if (interaction.commandName === 'vibe-progress') {
-    const range = interaction.options.getString('range') || '10';
-    const filterChannels = [
-      interaction.options.getChannel('channel'),
-      interaction.options.getChannel('channel2'),
-      interaction.options.getChannel('channel3'),
-      interaction.options.getChannel('channel4'),
-      interaction.options.getChannel('channel5')
-    ].filter(Boolean);
-    await handleProgressCommand(interaction, range, filterChannels);
-    return;
-  }
-
-  // ── /vibe-admin ────────────────────────────────────────
+  // VIBE-ADMIN COMMAND
   if (interaction.commandName === 'vibe-admin') {
-    await handleAdminCommand(interaction);
-    return;
+    if (interaction.user.id !== CONFIG.OWNER_ID) return interaction.reply({ content: '❌ Owner only command.', ephemeral: true });
+    const action = interaction.options.getString('action');
+    const serverId = interaction.options.getString('server_id');
+    const days = interaction.options.getInteger('days') || 30;
+    if (!/^\d{17,19}$/.test(serverId)) return interaction.reply({ content: '❌ Invalid server ID format.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    console.log(`🔧 ADMIN: ${action} on server ${serverId}`);
+    try {
+      if (action === 'status') {
+        const approved = await getApprovedServer(serverId);
+        const usage = await getUsage(serverId);
+        const request = await getApprovalRequest(serverId);
+        const totalReports = await getTotalReports(serverId);
+        const progressAccess = await hasProgressAccess(serverId);
+        const progressUsed = await getProgressUsage(serverId);
+        const subStatus = await getSubscriptionStatus(serverId);
+        const embed = new EmbedBuilder().setColor(subStatus.expired ? 0xef4444 : (subStatus.active ? 0x22c55e : 0x3b82f6)).setTitle(`📊 Server Status: ${serverId}`)
+          .addFields(
+            { name: 'Plan', value: approved ? (subStatus.expired ? '⚠️ Pro (EXPIRED)' : '⚡ Pro') : '🎁 Free', inline: true },
+            { name: 'Reports Used', value: `${usage.reports_used}/${approved ? CONFIG.PRO_REPORTS_PER_MONTH : CONFIG.FREE_REPORTS}`, inline: true },
+            { name: 'Total Reports', value: `${totalReports}`, inline: true },
+            { name: 'Progress Used', value: `${progressUsed}/${approved ? CONFIG.PRO_PROGRESS_REPORTS : CONFIG.FREE_PROGRESS_REPORTS}`, inline: true },
+            { name: 'Request Status', value: request?.status || 'None', inline: true },
+            { name: 'Progress Access', value: progressAccess ? '✅ Unlimited' : '📊 Limited', inline: true }
+          );
+        if (approved) embed.addFields(
+          { name: 'Expires', value: subStatus.expiresAt ? subStatus.expiresAt.toLocaleDateString() : 'Never', inline: true },
+          { name: 'Days Left', value: subStatus.daysLeft === 999 ? '∞' : `${subStatus.daysLeft}`, inline: true },
+          { name: 'Status', value: subStatus.expired ? '🔴 EXPIRED' : (subStatus.daysLeft <= 7 ? '🟡 EXPIRING SOON' : '🟢 ACTIVE'), inline: true }
+        );
+        return interaction.editReply({ embeds: [embed] });
+      }
+      if (action === 'approve') { const request = await getApprovalRequest(serverId); const expiresAt = await approveServer(serverId, request?.server_name || 'Unknown', days); return interaction.editReply(`✅ Server ${serverId} approved!\n\n📅 Expires: ${expiresAt.toLocaleDateString()} (${days} days)`); }
+      if (action === 'renew') { const expiresAt = await renewSubscription(serverId, days); if (!expiresAt) return interaction.editReply(`❌ Server ${serverId} not found.`); return interaction.editReply(`🔄 Server ${serverId} renewed!\n\n📅 New expiration: ${expiresAt.toLocaleDateString()}`); }
+      if (action === 'deny') { await updateApprovalStatus(serverId, 'denied'); return interaction.editReply(`❌ Server ${serverId} denied.`); }
+      if (action === 'reset') { await supabase.from('approval_requests').delete().eq('server_id', serverId); await supabase.from('approved_servers').delete().eq('server_id', serverId); return interaction.editReply(`🔄 Server ${serverId} reset.`); }
+      if (action === 'freetrial') { await supabase.from('usage').update({ reports_used: 0, progress_used: 0 }).eq('server_id', serverId); await supabase.from('approval_requests').delete().eq('server_id', serverId); await supabase.from('approved_servers').delete().eq('server_id', serverId); await supabase.from('progress_access').delete().eq('server_id', serverId); return interaction.editReply(`🎁 Server ${serverId} free trial reset!`); }
+      if (action === 'grant_progress') { await supabase.from('progress_access').upsert({ server_id: serverId, granted_at: new Date().toISOString() }); return interaction.editReply(`📈 Server ${serverId} granted unlimited progress reports!`); }
+      if (action === 'revoke_progress') { await supabase.from('progress_access').delete().eq('server_id', serverId); return interaction.editReply(`🚫 Server ${serverId} progress access revoked.`); }
+      if (action === 'delete_data') { console.log(`🗑️ GDPR DELETE requested for server ${serverId}`); await supabase.from('reports').delete().eq('server_id', serverId); await supabase.from('usage').delete().eq('server_id', serverId); await supabase.from('approved_servers').delete().eq('server_id', serverId); await supabase.from('approval_requests').delete().eq('server_id', serverId); await supabase.from('progress_access').delete().eq('server_id', serverId); return interaction.editReply(`🗑️ **GDPR DELETE COMPLETE** for server ${serverId}`); }
+    } catch (error) { console.error('Admin command error:', error); return interaction.editReply(`❌ Error: ${error.message}`); }
   }
-});
 
-// ============================================================
-// /vibe HANDLER
-// ============================================================
+  // VIBE-PROGRESS COMMAND
+  if (interaction.commandName === 'vibe-progress') {
+    const serverId = interaction.guildId;
+    const serverName = interaction.guild.name;
+    const channel = interaction.options.getChannel('channel');
+    const channelName = channel?.name || null;
+    const range = interaction.options.getString('range') || '14d';
+    
+    const canUseProgress = await canUseProgressReport(serverId, interaction.user.id);
+    if (!canUseProgress) {
+      const approved = await isApproved(serverId);
+      if (approved) {
+        const usage = await getUsage(serverId);
+        const monthStart = new Date(usage.month_start);
+        const daysUntilReset = Math.ceil(30 - ((new Date() - monthStart) / (1000 * 60 * 60 * 24)));
+        const embed = new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Progress Limit Reached').setDescription(`You've used all **${CONFIG.PRO_PROGRESS_REPORTS} progress reports** this month!\n\nYour progress reports reset in **${daysUntilReset} days**.`);
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+      } else {
+        const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('📈 Progress Reports').setDescription(`You've used your **${CONFIG.FREE_PROGRESS_REPORTS}** free demo!\n\n**Subscribe to unlock:**\n\n✓ 30 reports per month\n✓ ${CONFIG.PRO_PROGRESS_REPORTS} progress reports per month`);
+        const buttons = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' });
+        return interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+      }
+    }
+    
+    if (range === 'custom') {
+      setPendingCommand(pendingProgressCommands, interaction.user.id, { serverId, serverName, channelName });
+      const modal = new ModalBuilder().setCustomId('custom_reports_modal').setTitle('Custom # of Reports');
+      const reportCountInput = new TextInputBuilder().setCustomId('report_count').setLabel('Number of reports (1-100)').setStyle(TextInputStyle.Short).setPlaceholder('15').setRequired(true).setMinLength(1).setMaxLength(3);
+      modal.addComponents(new ActionRowBuilder().addComponents(reportCountInput));
+      return interaction.showModal(modal);
+    }
+    
+    await interaction.deferReply({ ephemeral: true });
+    await interaction.editReply('📊 Loading your progress report...');
+    const daysMap = { '1d': 1, '14d': 14, '30d': 30 };
+    const days = daysMap[range] || 14;
+    const reports = await getReportHistory(serverId, channelName, 100, days);
+    if (!reports || reports.length === 0) return interaction.editReply('❌ No reports found. Run `/vibe` first!');
+    const embeds = await buildProgressEmbeds(serverId, serverName, channelName, reports);
+    if (!embeds || embeds.length === 0) return interaction.editReply('❌ No reports found.');
+    const approved = await isApproved(serverId);
+    const hasPaid = await hasProgressAccess(serverId);
+    if (interaction.user.id !== CONFIG.OWNER_ID && !hasPaid) {
+      const newCount = await useProgressReport(serverId);
+      const limit = approved ? CONFIG.PRO_PROGRESS_REPORTS : CONFIG.FREE_PROGRESS_REPORTS;
+      const remaining = limit - newCount;
+      if (remaining <= 0) {
+        const warningEmbed = new EmbedBuilder().setColor(0xf59e0b).setDescription(approved ? `⚠️ You've used all **${CONFIG.PRO_PROGRESS_REPORTS}** progress reports this month!` : `⚠️ This was your free progress demo!`);
+        if (!approved) { const upgradeBtn = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99', yearlyLabel: '💎 Yearly · $99' }); await interaction.followUp({ embeds: [warningEmbed], components: [upgradeBtn], ephemeral: true }); }
+        else await interaction.followUp({ embeds: [warningEmbed], ephemeral: true });
+      }
+    }
+    await sendProgressReportEmail(serverName, serverId, channelName, reports, interaction.user.username);
+    return interaction.editReply({ embeds: embeds.slice(0, 10) });
+  }
 
-async function handleVibeCommand(interaction) {
+  // VIBE COMMAND
+  if (interaction.commandName !== 'vibe') return;
+
   const serverId = interaction.guildId;
-  const serverName = interaction.guild.name;
-
-  // Cooldown check
-  if (isOnCooldown(interaction.user.id)) {
-    return interaction.reply({
-      content: `⏳ Please wait ${CONFIG.COOLDOWN_SECONDS} seconds between reports.`,
-      ephemeral: true
-    });
+  const userId = interaction.user.id;
+  
+  if (userId !== CONFIG.OWNER_ID) {
+    if (isOnCooldown(serverId, userId)) return interaction.reply({ content: `⏳ Please wait ${getCooldownRemaining(serverId, userId)} seconds.`, ephemeral: true });
+    if (isServerThrottled(serverId)) return interaction.reply({ content: `⏳ This server has reached the rate limit.`, ephemeral: true });
+  }
+  
+  const subStatus = await getSubscriptionStatus(serverId);
+  const approvedServer = await getApprovedServer(serverId);
+  
+  if (approvedServer && subStatus.expired) {
+    const embed = new EmbedBuilder().setColor(0xef4444).setTitle('⚠️ Subscription Expired').setDescription(`Your Pro subscription has expired!\n\n**Renew to continue:**\n\n✓ 30 reports per month\n✓ ${CONFIG.PRO_PROGRESS_REPORTS} progress reports per month`);
+    const buttons = createSubscriptionButtons({ monthlyLabel: '🔄 Monthly · $9.99/mo', yearlyLabel: '💎 Yearly · $99/yr (Save 17%)' });
+    return interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+  }
+  
+  const approved = await isApproved(serverId);
+  const canUse = await canUseBot(serverId, interaction.user.id);
+  
+  if (!canUse) {
+    if (approved) {
+      const usage = await getUsage(serverId);
+      const monthStart = new Date(usage.month_start);
+      const daysUntilReset = Math.ceil(30 - ((new Date() - monthStart) / (1000 * 60 * 60 * 24)));
+      const embed = new EmbedBuilder().setColor(0xf59e0b).setTitle('⚠️ Monthly Limit Reached').setDescription(`You've used all **30 reports** this month!\n\nYour reports reset in **${daysUntilReset} days**.`);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    } else {
+      const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('🏆 VibeCheck Pro').setDescription(`Your free trial is complete!\n\n**Subscribe to continue:**\n\n✓ 30 reports per month\n✓ ${CONFIG.PRO_PROGRESS_REPORTS} progress reports per month`);
+      const buttons = createSubscriptionButtons({ monthlyLabel: '⚡ Monthly · $9.99/mo', yearlyLabel: '💎 Yearly · $99/yr (Save 17%)' });
+      return interaction.reply({ embeds: [embed], components: [buttons], ephemeral: true });
+    }
   }
 
-  if (isServerThrottled(serverId)) {
-    return interaction.reply({
-      content: `⏳ This server is running too many reports at once. Please wait a minute and try again.`,
-      ephemeral: true
-    });
-  }
-  incrementServerThrottle(serverId);
-
-  // Get options
+  const channel = interaction.options.getChannel('channel') || interaction.channel;
   const visibility = interaction.options.getString('visibility') || 'private';
   const sensitivity = interaction.options.getString('sensitivity') || 'medium';
-  const timeframe = interaction.options.getString('timeframe') || '7d';
+  const timeframe = interaction.options.getString('timeframe') || '24h';
+  const messagesOption = interaction.options.getString('messages') || '100';
+  const messageCount = parseInt(messagesOption);
+
   const isPrivate = visibility === 'private';
-  const isPublic = !isPrivate;
-  const serverIsPaid = await isPaid(serverId);
-
-  // Collect channels
-  const rawChannels = [
-    interaction.options.getChannel('channel') || interaction.channel,
-    interaction.options.getChannel('channel2'),
-    interaction.options.getChannel('channel3'),
-    interaction.options.getChannel('channel4'),
-    interaction.options.getChannel('channel5')
-  ].filter(Boolean);
-
-  // Deduplicate
-  const seen = new Set();
-  const channels = rawChannels.filter(c => {
-    if (seen.has(c.id)) return false;
-    seen.add(c.id);
-    return true;
-  });
-
-  // Pro check for multi-channel
-  if (channels.length > 1 && !serverIsPaid) {
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setColor(0xf59e0b)
-        .setTitle('⚡ Multi-Channel Analysis is a Pro Feature')
-        .setDescription('Upgrade to Pro to analyze up to 5 channels in one report.')
-        .addFields({ name: 'Get Pro', value: `[Monthly $8.99/mo](${CONFIG.STRIPE_MONTHLY_LINK}) | [Yearly $99/yr](${CONFIG.STRIPE_YEARLY_LINK})` })
-      ],
-      ephemeral: true
-    });
-  }
-
-  // Message count
-  let messageCount = interaction.options.getInteger('messages') || 100;
-  if (!serverIsPaid && messageCount > CONFIG.FREE_MAX_MESSAGES) {
-    messageCount = CONFIG.FREE_MAX_MESSAGES;
-  }
-
-  // Trial / limit check
-  if (!(await canUseBot(serverId))) {
-    if (serverIsPaid) {
-      // Pro user hit monthly limit — show days until reset
-      const { data: usageData } = await supabase.from('usage').select('month_start').eq('server_id', serverId).single();
-      const monthStart = usageData?.month_start ? new Date(usageData.month_start) : new Date();
-      const daysUntilReset = Math.max(1, Math.ceil(30 - ((Date.now() - monthStart.getTime()) / (1000 * 60 * 60 * 24))));
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setTitle('⚠️ Monthly Limit Reached')
-          .setDescription(`You've used all **${CONFIG.PRO_REPORTS_PER_MONTH} reports** this month.\n\nYour reports reset in **${daysUntilReset} day${daysUntilReset === 1 ? '' : 's'}**.`)
-          .addFields({ name: '💡 Tip', value: 'Upgrade to yearly to get more reports at a lower cost.', inline: false },
-            { name: 'Yearly', value: `[$99/yr — save 8%](${CONFIG.STRIPE_YEARLY_LINK})`, inline: true })
-        ],
-        components: [new ActionRowBuilder().addComponents(
-          ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('Upgrade to Yearly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
-        )],
-        ephemeral: true
-      });
-    } else {
-      // Free trial ended — notify owner by email then show paywall
-      await sendTrialEndedEmail(serverName, serverId, interaction.user.tag);
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setTitle('⚠️ Free Trial Ended')
-          .setDescription(`You've used all **${CONFIG.FREE_REPORTS}** free reports.`)
-          .addFields(
-            { name: '⚡ Upgrade to Pro', value: `30 reports/month • Up to 1,000 messages • Multi-channel` },
-            { name: 'Monthly', value: `[$8.99/mo](${CONFIG.STRIPE_MONTHLY_LINK})`, inline: true },
-            { name: 'Yearly', value: `[$99/yr — save 8%](${CONFIG.STRIPE_YEARLY_LINK})`, inline: true }
-          )
-        ],
-        components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('Get Pro Monthly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
-          ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('Get Pro Yearly').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
-        )],
-        ephemeral: true
-      });
-    }
-  }
-
   await interaction.deferReply({ ephemeral: isPrivate });
-  setCooldown(interaction.user.id);
 
-  try {
-    // Timeframe in ms
-    const timeMs = {
-      '1h': 1 * 60 * 60 * 1000,
-      '24h': 24 * 60 * 60 * 1000,
-      '7d': 7 * 24 * 60 * 60 * 1000,
-      '14d': 14 * 24 * 60 * 60 * 1000,
-      '30d': 30 * 24 * 60 * 60 * 1000
-    }[timeframe] || (7 * 24 * 60 * 60 * 1000);
-
-    const timeframeLabel = {
-      '1h': '1 hour', '24h': '24 hours', '7d': '7 days',
-      '14d': '14 days', '30d': '30 days'
-    }[timeframe] || '7 days';
-
-    // Fetch messages from all channels
-    const msgsPerChannel = Math.floor(messageCount / channels.length);
-    let allMessages = [];
-    const channelNames = [];
-    const channelMsgCounts = {}; // track per-channel message counts
-
-    for (const ch of channels) {
-      if (!canReadChannel(interaction.guild, ch)) {
-        return interaction.editReply(`❌ I don't have permission to read **#${ch.name}**. Please check my channel permissions and try again.`);
-      }
-      const msgs = await fetchChannelMessages(ch, msgsPerChannel, timeMs);
-      channelMsgCounts[`#${ch.name}`] = msgs.length;
-      allMessages = allMessages.concat(msgs);
-      channelNames.push(`#${ch.name}`);
-    }
-
-    if (allMessages.length < 5) {
-      return interaction.editReply('❌ Not enough messages to analyze. Need at least 5 messages. Try a longer timeframe.');
-    }
-
-    // ── Per-channel analysis (one OpenAI call per channel) ──
-    const channelResults = {};
-    let totalProcessingTime = 0, totalCost = 0, totalInputTokens = 0, totalOutputTokens = 0, totalAnalyzed = 0;
-
-    for (const ch of channels) {
-      const chName = `#${ch.name}`;
-      const chMsgs = await fetchChannelMessages(ch, msgsPerChannel, timeMs);
-      if (chMsgs.length < 2) {
-        channelResults[chName] = null;
-        continue;
-      }
-      const res = await analyzeMessages(chMsgs, [chName], sensitivity, timeframeLabel);
-      channelResults[chName] = res;
-      totalProcessingTime += res.processingTime || 0;
-      totalCost += res.cost || 0;
-      totalInputTokens += res.inputTokens || 0;
-      totalOutputTokens += res.outputTokens || 0;
-      totalAnalyzed += res.analyzedCount || 0;
-    }
-
-    // Combined result = weighted average by message count (impact score)
-    const validChannels = Object.entries(channelResults).filter(([, r]) => r !== null);
-    if (validChannels.length === 0) {
-      return interaction.editReply('❌ Not enough messages to analyze in any channel. Try a longer timeframe.');
-    }
-
-    const totalMsgsForWeight = validChannels.reduce((s, [, r]) => s + r.analyzedCount, 0) || 1;
-    const impactScore = parseFloat(
-      (validChannels.reduce((s, [, r]) => s + r.result.friendlinessScore * r.analyzedCount, 0) / totalMsgsForWeight).toFixed(1)
-    );
-
-    // Merge sentiment and toxicity across channels
-    const combinedSentiment = { friendly: 0, neutral: 0, unfriendly: 0 };
-    const combinedToxTypes = {};
-    const combinedFlagged = [];
-    let combinedSummary = '';
-    let combinedRec = '';
-
-    for (const [, res] of validChannels) {
-      combinedSentiment.friendly += res.result.sentiment.friendly || 0;
-      combinedSentiment.neutral += res.result.sentiment.neutral || 0;
-      combinedSentiment.unfriendly += res.result.sentiment.unfriendly || 0;
-      if (res.result.toxicityTypes) {
-        Object.entries(res.result.toxicityTypes).forEach(([k, v]) => {
-          combinedToxTypes[k] = (combinedToxTypes[k] || 0) + (v || 0);
-        });
-      }
-      if (res.result.flaggedMessages) combinedFlagged.push(...res.result.flaggedMessages);
-    }
-
-    // Use the worst-performing channel's summary for overall insight
-    const worstChannel = validChannels.sort((a, b) => a[1].result.friendlinessScore - b[1].result.friendlinessScore)[0];
-    combinedSummary = validChannels.length > 1
-      ? `Overall impact score across ${validChannels.length} channels: ${impactScore}/10. ${worstChannel[0]} needs the most attention.`
-      : validChannels[0][1].result.summary || '';
-    combinedRec = validChannels.length > 1
-      ? `Focus moderation efforts on ${worstChannel[0]} (score: ${worstChannel[1].result.friendlinessScore}/10).`
-      : validChannels[0][1].result.recommendation || '';
-
-    // Build combined result object
-    const result = {
-      friendlinessScore: impactScore,
-      sentiment: combinedSentiment,
-      flaggedMessages: combinedFlagged.sort((a, b) => b.severity - a.severity).slice(0, 10),
-      toxicityTypes: combinedToxTypes,
-      summary: combinedSummary,
-      recommendation: combinedRec
-    };
-    const analyzedCount = totalAnalyzed;
-    const processingTime = totalProcessingTime;
-    const cost = totalCost;
-    const inputTokens = totalInputTokens;
-    const outputTokens = totalOutputTokens;
-
-    // Fetch reaction stats from primary channel
-    const reactionStats = await getChannelStats(interaction.guild, channels[0], timeMs);
-
-    // Increment usage
-    await incrementUsage(serverId);
-    const remaining = await getReportsRemaining(serverId);
-
-    // Build embed
-    const reportEmbed = buildReportEmbed(
-      result, analyzedCount, channelNames,
-      timeframeLabel, sensitivity, remaining, serverIsPaid, reactionStats, reactionStats, isPublic, channelMsgCounts, channelResults
-    );
-
-    // Buttons
-    const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('📧 Request Tools')
-        .setStyle(ButtonStyle.Link)
-        .setURL('https://www.felixagaming.com/vibe'),
-      new ButtonBuilder()
-        .setLabel('📈 View Progress')
-        .setStyle(ButtonStyle.Primary)
-        .setCustomId('view_progress')
-    );
-
-    if (!serverIsPaid) {
-      buttons.addComponents(
-        new ButtonBuilder()
-          .setLabel('⚡ Upgrade to Pro')
-          .setStyle(ButtonStyle.Link)
-          .setURL(CONFIG.STRIPE_MONTHLY_LINK)
-      );
-    }
-
-    await interaction.editReply({ embeds: [reportEmbed], components: [buttons] });
-
-    // Save to Supabase
-    await saveReport(
-      serverId, serverName, channelNames,
-      result.friendlinessScore, result.sentiment,
-      result.flaggedMessages?.length || 0,
-      sensitivity, timeframe, analyzedCount,
-      result.toxicityTypes
-    );
-
-    // Log to research_logs
-    await logResearchData({
-      serverName,
-      serverId,
-      memberCount:    interaction.guild.memberCount,
-      channelNames,
-      channelResults,
-      analyzedCount,
-      score:          result.friendlinessScore,
-      sentiment:      result.sentiment,
-      flaggedCount:   result.flaggedMessages?.length || 0,
-      toxicityTypes:  result.toxicityTypes,
-      sensitivity,
-      timeframe,
-      isPro:          serverIsPaid,
-      inputTokens,
-      outputTokens,
-      cost,
-      processingTime
-    });
-
-    // Send email
-    await sendEmailReport(
-      serverName, serverId, channelNames,
-      result, analyzedCount, timeframeLabel,
-      sensitivity, remaining
-    );
-
-    // Owner notifications
-    const usedNow = await getReportsUsed(serverId);
-    if (usedNow === 1) {
-      // First ever report — new trial started
-      await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
-    }
-
-    // Milestone message every 5 reports
-    const used = await getReportsUsed(serverId);
-    if (used % 5 === 0) {
-      const milestoneEmbed = new EmbedBuilder()
-        .setColor(0xA78BFA)
-        .setDescription(
-          `🎉 You've completed **${used} reports**!\nWant to see how your community is improving?`
-        );
-      const milestoneButton = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel('📈 View Progress Report')
-          .setStyle(ButtonStyle.Primary)
-          .setCustomId('view_progress')
-      );
-      await interaction.followUp({ embeds: [milestoneEmbed], components: [milestoneButton], ephemeral: true });
-    }
-
-    // Low reports warning (free users)
-    if (!serverIsPaid && remaining > 0 && remaining <= 2) {
-      const reportWord = remaining === 1 ? 'report' : 'reports';
-      await interaction.followUp({
-        embeds: [new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setDescription(`⚠️ Only **${remaining}** free ${reportWord} left. [Get Pro](${CONFIG.STRIPE_MONTHLY_LINK}) for 30/month.`)
-        ],
-        ephemeral: true
-      });
-    }
-
-    // Pro expiry warning (7 days or less)
-    if (serverIsPaid) {
-      const subStatus = await getSubscriptionStatus(serverId);
-      if (subStatus.isActive && subStatus.daysLeft <= 7) {
-        const dayWord = subStatus.daysLeft === 1 ? 'day' : 'days';
-        const expiryEmbed = new EmbedBuilder()
-          .setColor(0xf59e0b)
-          .setTitle('⏰ Subscription Expiring Soon')
-          .setDescription(
-            `Your Pro subscription expires in **${subStatus.daysLeft} ${dayWord}**!\n\n` +
-            `Renew to keep access to 30 reports/month, multi-channel analysis, and more.`
-          );
-        const renewButtons = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('🔄 Renew Monthly — $8.99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK),
-          ...(CONFIG.YEARLY_ENABLED ? [new ButtonBuilder().setLabel('💎 Renew Yearly — $99').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_YEARLY_LINK)] : [])
-        );
-        await interaction.followUp({ embeds: [expiryEmbed], components: [renewButtons], ephemeral: true });
-      }
-    }
-
-  } catch (err) {
-    console.error('Vibe error:', err);
-    await interaction.editReply('❌ Something went wrong. Please try again in a moment.');
-  }
-}
-
-// ============================================================
-// /vibe-progress HANDLER
-// ============================================================
-
-
-// ── Get channel member stats ──────────────────────────────
-async function getChannelStats(guild, channel, timeframeMs = 7 * 24 * 60 * 60 * 1000) {
-  try {
-    // Members with access to this channel
-    const allMembers = await guild.members.fetch();
-    const membersWithAccess = allMembers.filter(member =>
-      channel.permissionsFor(member)?.has('ViewChannel') && !member.user.bot
-    ).size;
-
-    // Active members: sent at least 1 message in the timeframe
-    const cutoff = Date.now() - timeframeMs;
-    let messages = [];
-    let lastId;
-    const authorIds = new Set();
-
-    while (true) {
-      const options = { limit: 100 };
-      if (lastId) options.before = lastId;
-      const fetched = await channel.messages.fetch(options);
-      if (fetched.size === 0) break;
-      fetched.forEach(m => {
-        if (!m.author.bot && m.createdTimestamp > cutoff) authorIds.add(m.author.id);
-      });
-      if (fetched.last().createdTimestamp < cutoff) break;
-      lastId = fetched.last().id;
-      if (authorIds.size > 500) break; // safety cap
-    }
-
-    // Reaction stats — scan messages we already fetched
-    const POSITIVE = ['👍','❤️','😂','🔥','✅','🎉','😊','💯','⭐','🙌'];
-    const NEGATIVE = ['👎','😡','🤮','💀','😤','😒','🤦'];
-    let mostReacted = null, mostPositive = null, mostNegative = null;
-    let maxTotal = 0, maxPos = 0, maxNeg = 0;
-
-    // Re-fetch recent messages for reactions (up to last 100)
-    try {
-      const recentMsgs = await channel.messages.fetch({ limit: 100 });
-      recentMsgs.forEach(m => {
-        if (m.author.bot || !m.content) return;
-        let total = 0, pos = 0, neg = 0, reactionStr = '';
-        m.reactions.cache.forEach(r => {
-          const count = r.count;
-          total += count;
-          reactionStr += `${r.emoji.name}×${count} `;
-          if (POSITIVE.includes(r.emoji.name)) pos += count;
-          if (NEGATIVE.includes(r.emoji.name)) neg += count;
-        });
-        reactionStr = reactionStr.trim();
-        if (total > maxTotal) { maxTotal = total; mostReacted = { text: m.content.substring(0, 80), reactions: reactionStr }; }
-        if (pos > maxPos)     { maxPos = pos;     mostPositive = { text: m.content.substring(0, 80), reactions: reactionStr }; }
-        if (neg > maxNeg)     { maxNeg = neg;      mostNegative = { text: m.content.substring(0, 80), reactions: reactionStr }; }
-      });
-    } catch {}
-
-    return {
-      totalMembers: guild.memberCount,
-      membersWithAccess,
-      activeMembers: authorIds.size,
-      mostReacted,
-      mostPositive,
-      mostNegative
-    };
-  } catch {
-    return { totalMembers: guild.memberCount, membersWithAccess: null, activeMembers: null, mostReacted: null, mostPositive: null, mostNegative: null };
-  }
-}
-
-async function handleProgressCommand(interaction, range, filterChannels) {
-  const serverId = interaction.guildId;
-  await interaction.deferReply({ ephemeral: true });
-
-  try {
-    // Build base query
-    let query = supabase
-      .from('reports')
-      .select('*')
-      .eq('server_id', serverId)
-      .order('created_at', { ascending: false });
-
-    if (range === '30d') {
-      const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      query = query.gte('created_at', since);
-    } else {
-      query = query.limit(parseInt(range) || 10);
-    }
-
-    const { data: reports, error } = await query;
-
-    if (error || !reports || reports.length === 0) {
-      return interaction.editReply('❌ No reports found. Run `/vibe` first to start tracking progress.');
-    }
-
-    const sorted = [...reports].reverse(); // oldest to newest
-
-    // ── MULTI-CHANNEL COMPARISON MODE ──────────────────────────
-    if (filterChannels && filterChannels.length > 1) {
-      const channelNames = filterChannels.map(c => `#${c.name}`);
-
-      // Get per-channel report data
-      const channelData = {};
-      for (const ch of filterChannels) {
-        const chName = `#${ch.name}`;
-        channelData[chName] = sorted.filter(r =>
-          r.channel_name && r.channel_name.includes(chName)
-        );
-      }
-
-      // Fetch member stats per channel
-      const channelStats = {};
-      for (const ch of filterChannels) {
-        const chName = `#${ch.name}`;
-        channelStats[chName] = await getChannelStats(interaction.guild, ch);
-      }
-
-      // Build per-channel summary
-      const channelSummaries = channelNames.map(chName => {
-        const chReports = channelData[chName];
-        if (!chReports || chReports.length === 0) return null;
-
-        const latest = chReports[chReports.length - 1];
-        const oldest = chReports[0];
-        const avg = (chReports.reduce((s, r) => s + r.score, 0) / chReports.length).toFixed(1);
-        const diff = (latest.score - oldest.score).toFixed(1);
-        const trend = diff > 0 ? `📈 +${diff}` : diff < 0 ? `📉 ${diff}` : '➡️ 0.0';
-
-        // Toxicity for this channel
-        const toxMap = {};
-        chReports.forEach(r => {
-          try {
-            const types = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
-            if (types) Object.entries(types).forEach(([k, v]) => { toxMap[k] = (toxMap[k] || 0) + (v || 0); });
-          } catch {}
-        });
-        const topTox = Object.entries(toxMap)
-          .filter(([, v]) => v > 0)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([k, v]) => `${k}(${v})`)
-          .join(', ') || 'none';
-
-        // Flagged trend
-        const firstFlagged = oldest.flagged_count || 0;
-        const lastFlagged = latest.flagged_count || 0;
-        const flagDiff = lastFlagged - firstFlagged;
-        const flagTrend = flagDiff < 0 ? `✅ ↓${Math.abs(flagDiff)}` : flagDiff > 0 ? `⚠️ ↑${flagDiff}` : '➡️ same';
-
-        // Score bar for latest
-        const bar = '█'.repeat(Math.round(latest.score)) + '░'.repeat(10 - Math.round(latest.score));
-        const emoji = latest.score >= 7 ? '🟢' : latest.score >= 4 ? '🟡' : '🔴';
-
-        const stats = channelStats[chName] || {};
-        return {
-          name: chName,
-          reports: chReports.length,
-          latest: latest.score,
-          avg,
-          trend,
-          bar,
-          emoji,
-          flagTrend,
-          topTox,
-          diff: parseFloat(diff),
-          totalMembers: stats.totalMembers || null,
-          membersWithAccess: stats.membersWithAccess || null,
-          activeMembers: stats.activeMembers || null,
-          mostReacted: stats.mostReacted || null,
-          mostPositive: stats.mostPositive || null,
-          mostNegative: stats.mostNegative || null
-        };
-      }).filter(Boolean);
-
-      if (channelSummaries.length === 0) {
-        return interaction.editReply('❌ No report data found for the selected channels. Make sure you have run `/vibe` in those channels first.');
-      }
-
-      // Sort: worst first (needs most attention)
-      const byScore = [...channelSummaries].sort((a, b) => a.latest - b.latest);
-      const needsAttention = byScore[0];
-      const healthiest = byScore[byScore.length - 1];
-      const escalating = channelSummaries.filter(c => c.diff < -0.5).sort((a, b) => a.diff - b.diff);
-      const improving = channelSummaries.filter(c => c.diff > 0.5).sort((a, b) => b.diff - a.diff);
-
-      // Per-channel fields — Section 1: Descriptive
-      const channelDescFields = channelSummaries.map(c => {
-        const memberLine = c.membersWithAccess !== null
-          ? `👥 Access: ${c.membersWithAccess} | 💬 Active (7d): ${c.activeMembers}`
-          : `👥 Server members: ${c.totalMembers}`;
-        return {
-          name: `${c.emoji} ${c.name}`,
-          value:
-            `\`${c.bar}\` **${c.latest}/10**\n` +
-            `Avg: ${c.avg} | Trend: ${c.trend}\n` +
-            memberLine,
-          inline: false
-        };
-      });
-
-      // Per-channel fields — Section 2: Toxicity
-      const channelToxFields = channelSummaries.map(c => ({
-        name: `⚠️ ${c.name} — Toxicity`,
-        value: `Flagged: ${c.flagTrend} | Types: ${c.topTox}`,
-        inline: false
-      }));
-
-      // Per-channel fields — Section 3: Reactions
-      const channelReactionFields = channelSummaries.map(c => {
-        const lines = [];
-        if (c.mostReacted)  lines.push(`⭐ **Most reacted:** "${c.mostReacted.text}" — ${c.mostReacted.reactions}`);
-        if (c.mostPositive) lines.push(`👍 **Most positive:** "${c.mostPositive.text}" — ${c.mostPositive.reactions}`);
-        if (c.mostNegative) lines.push(`👎 **Most negative:** "${c.mostNegative.text}" — ${c.mostNegative.reactions}`);
-        return {
-          name: `💬 ${c.name} — Top Comments`,
-          value: lines.join('\n') || 'No reactions found.',
-          inline: false
-        };
-      });
-
-      // Insights
-      const insights = [];
-      if (needsAttention) insights.push(`🔴 **${needsAttention.name}** needs most attention — score ${needsAttention.latest}/10`);
-      if (healthiest && healthiest.name !== needsAttention?.name) insights.push(`✅ **${healthiest.name}** is healthiest — score ${healthiest.latest}/10`);
-      if (escalating.length > 0) insights.push(`⚠️ **Escalating toxicity:** ${escalating.map(c => c.name).join(', ')}`);
-      if (improving.length > 0) insights.push(`📈 **Improving:** ${improving.map(c => c.name).join(', ')}`);
-
-      // Toxicity comparison across channels
-      const toxComparison = channelSummaries.map(c => `**${c.name}:** ${c.topTox}`).join('\n');
-
-      const embed = new EmbedBuilder()
-        .setColor(0xA78BFA)
-        .setTitle(`📊 Channel Comparison — ${interaction.guild.name}`)
-        .setDescription(`Comparing **${channelNames.join(', ')}**`)
-        .addFields(
-          // Section 1 — Descriptive
-          ...channelDescFields,
-          { name: '🔍 Key Insights', value: insights.join('\n') || 'Not enough data yet.', inline: false },
-          // Section 2 — Toxicity
-          ...channelToxFields,
-          { name: '⚠️ Toxicity by Channel', value: toxComparison, inline: false },
-          // Section 3 — Reactions
-          ...channelReactionFields,
-          // Vibe Check Bot Recommendations (always last)
-          {
-            name: '💡 Vibe Check Bot Recommendations',
-            value: [
-              needsAttention ? `🔴 Focus moderation efforts on **${needsAttention.name}** — lowest score at ${needsAttention.latest}/10.` : null,
-              escalating.length > 0 ? `⚠️ **${escalating.map(c => c.name).join(', ')}** showing escalating toxicity — review recent flagged messages and consider a warning post.` : null,
-              improving.length > 0 ? `📈 **${improving.map(c => c.name).join(', ')}** improving — keep current moderation approach there.` : null,
-              `Run \`/vibe\` regularly in each channel to build up more comparison data.`
-            ].filter(Boolean).join('\n'),
-            inline: false
-          }
-        )
-        .setFooter({ text: 'Vibe Check Bot • Run /vibe regularly to build up comparison data' });
-
-      return interaction.editReply({ embeds: [embed] });
-    }
-
-    // ── SINGLE CHANNEL OR ALL CHANNELS MODE ────────────────────
-    let filteredReports = sorted;
-    let filterLabel = '';
-
-    if (filterChannels && filterChannels.length === 1) {
-      const chName = `#${filterChannels[0].name}`;
-      filteredReports = sorted.filter(r => r.channel_name && r.channel_name.includes(chName));
-      filterLabel = ` • ${chName}`;
-      if (filteredReports.length === 0) {
-        return interaction.editReply(`❌ No reports found for ${chName}. Run \`/vibe\` in that channel first.`);
-      }
-    }
-
-    // Build per-channel trend lines (from research_logs which stores one row per channel)
-    const allChannelsInData = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
-    const perChannelTrend = allChannelsInData.length > 1
-      ? allChannelsInData.map(chName => {
-          const chReports = sorted.filter(r => r.channel_name === chName);
-          if (chReports.length < 2) return null;
-          const chLatest = chReports[chReports.length - 1].score;
-          const chOldest = chReports[0].score;
-          const chDiff = (chLatest - chOldest).toFixed(1);
-          const arrow = chDiff > 0 ? `📈 +${chDiff}` : chDiff < 0 ? `📉 ${chDiff}` : '➡️ 0.0';
-          const dot = chLatest >= 7 ? '🟢' : chLatest >= 4 ? '🟡' : '🔴';
-          const bar = '█'.repeat(Math.round(chLatest)) + '░'.repeat(10 - Math.round(chLatest));
-          return `${dot} **${chName}**  \`${bar}\`  **${chLatest}/10**  ${arrow}`;
-        }).filter(Boolean).join('\n')
-      : null;
-
-    const latest = filteredReports[filteredReports.length - 1];
-    const oldest = filteredReports[0];
-    const avgScore = (filteredReports.reduce((sum, r) => sum + r.score, 0) / filteredReports.length).toFixed(1);
-    const scoreDiff = (latest.score - oldest.score).toFixed(1);
-    const trend = scoreDiff > 0 ? `📈 +${scoreDiff}` : scoreDiff < 0 ? `📉 ${scoreDiff}` : '➡️ 0.0';
-
-    // Score graph — coloured bars per data point
-    const graphLines = filteredReports.map(r => {
-      const date = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const bar = '█'.repeat(Math.round(r.score)) + '░'.repeat(10 - Math.round(r.score));
-      const dot = r.score >= 7 ? '🟢' : r.score >= 4 ? '🟡' : '🔴';
-      return `${dot} \`${date.padEnd(8)}\` \`${bar}\` **${r.score}**`;
-    });
-
-    // Sentiment evolution
-    const firstFriendlyPct = Math.round((oldest.friendly / (oldest.friendly + oldest.neutral + oldest.unfriendly)) * 100);
-    const lastFriendlyPct = Math.round((latest.friendly / (latest.friendly + latest.neutral + latest.unfriendly)) * 100);
-    const firstUnfriendlyPct = Math.round((oldest.unfriendly / (oldest.friendly + oldest.neutral + oldest.unfriendly)) * 100);
-    const lastUnfriendlyPct = Math.round((latest.unfriendly / (latest.friendly + latest.neutral + latest.unfriendly)) * 100);
-
-    // Toxicity breakdown
-    const toxMap = {};
-    filteredReports.forEach(r => {
-      try {
-        const types = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
-        if (types) Object.entries(types).forEach(([k, v]) => { toxMap[k] = (toxMap[k] || 0) + (v || 0); });
-      } catch {}
-    });
-    const topToxicities = Object.entries(toxMap)
-      .filter(([, v]) => v > 0)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([k, v]) => `• ${k}: ${v}`)
-      .join('\n') || 'None detected';
-
-    // Channel breakdown
-    const channelCounts = {};
-    filteredReports.forEach(r => {
-      const ch = r.channel_name || 'unknown';
-      channelCounts[ch] = (channelCounts[ch] || 0) + 1;
-    });
-    const channelBreakdown = Object.entries(channelCounts)
-      .map(([ch, count]) => `• ${ch}: ${count} reports`)
-      .join('\n');
-
-    // Sensitivity breakdown
-    const sensCounts = {};
-    filteredReports.forEach(r => { sensCounts[r.sensitivity] = (sensCounts[r.sensitivity] || 0) + 1; });
-    const sensBreakdown = Object.entries(sensCounts).map(([s, c]) => `${s}: ${c}`).join(' | ');
-
-    // Flagged trend
-    const firstFlagged = oldest.flagged_count || 0;
-    const lastFlagged = latest.flagged_count || 0;
-    const flaggedDiff = lastFlagged - firstFlagged;
-    const flaggedTrend = flaggedDiff < 0 ? `✅ ↓${Math.abs(flaggedDiff)} fewer` : flaggedDiff > 0 ? `⚠️ ↑${flaggedDiff} more` : '➡️ Same';
-
-    const embed = new EmbedBuilder()
-      .setColor(0xA78BFA)
-      .setTitle(`📈 Progress Report — ${interaction.guild.name}`)
-      .setDescription(`**${filteredReports.length} reports analyzed**${filterLabel}`)
-      .addFields(
-        { name: '📊 Score History (oldest → newest)', value: graphLines.slice(-10).join('\n') || 'No data', inline: false },
-        {
-          name: '🎯 Overall Trend',
-          value: `First: **${oldest.score}/10** → Latest: **${latest.score}/10**\nAverage: **${avgScore}/10** | Change: **${trend}**`,
-          inline: false
-        },
-        {
-          name: '💬 Sentiment Evolution',
-          value:
-            `🟢 Friendly: ${firstFriendlyPct}% → ${lastFriendlyPct}% (${lastFriendlyPct > firstFriendlyPct ? '+' : ''}${lastFriendlyPct - firstFriendlyPct}%)\n` +
-            `🔴 Unfriendly: ${firstUnfriendlyPct}% → ${lastUnfriendlyPct}% (${lastUnfriendlyPct > firstUnfriendlyPct ? '+' : ''}${lastUnfriendlyPct - firstUnfriendlyPct}%)`,
-          inline: false
-        },
-        { name: '🚩 Flagged Messages', value: `First: ${firstFlagged} | Latest: ${lastFlagged} | ${flaggedTrend}`, inline: false },
-        { name: '⚠️ Top Toxicity Types', value: topToxicities, inline: true },
-        { name: '📺 Channels Analyzed', value: channelBreakdown || 'N/A', inline: true },
-        { name: '⚙️ Sensitivity Used', value: sensBreakdown || 'N/A', inline: false }
-      );
-
-    // Per-channel comparison trend (if multiple channels have been analyzed)
-    if (perChannelTrend) {
-      embed.addFields({ name: '📊 Per-Channel Score Trend', value: perChannelTrend, inline: false });
-    }
-
-    // Vibe Check Bot Recommendations based on trend data (always last)
-    const progressRec = [];
-    if (parseFloat(scoreDiff) < -0.5) progressRec.push(`📉 Your score has dropped ${Math.abs(scoreDiff)} points. Review flagged messages and consider a community reminder about server rules.`);
-    else if (parseFloat(scoreDiff) > 0.5) progressRec.push(`📈 Great progress! Your score improved by ${scoreDiff} points. Keep up current moderation efforts.`);
-    else progressRec.push(`➡️ Your community score is stable. Consider running a targeted analysis on specific channels to identify improvement areas.`);
-    if (lastFlagged > firstFlagged) progressRec.push(`⚠️ Flagged messages increased from ${firstFlagged} to ${lastFlagged}. Consider reviewing your sensitivity settings or increasing moderation.`);
-    if (lastUnfriendlyPct > firstUnfriendlyPct) progressRec.push(`🔴 Unfriendly messages rose from ${firstUnfriendlyPct}% to ${lastUnfriendlyPct}%. A pinned reminder of community guidelines may help.`);
-
-    embed.addFields({
-      name: '💡 Vibe Check Bot Recommendations',
-      value: progressRec.join('\n'),
-      inline: false
-    });
-
-    embed.setFooter({ text: 'Vibe Check Bot • Keep running /vibe to track your progress!' });
-
-    await interaction.editReply({ embeds: [embed] });
-
-    // Email owner with progress summary
-    const allChannelNames = filteredReports.map(r => r.channel_name).filter((v, i, a) => a.indexOf(v) === i);
-    await sendProgressReportEmail(
-      interaction.guild.name, interaction.guildId,
-      allChannelNames, filteredReports, interaction.user.tag
-    );
-
-  } catch (err) {
-    console.error('Progress error:', err);
-    await interaction.editReply('❌ Something went wrong loading your progress report.');
-  }
-}
-
-
-// ============================================================
-// /vibe-admin HANDLER
-// ============================================================
-
-async function handleAdminCommand(interaction) {
-  // Owner only
-  if (interaction.user.id !== CONFIG.OWNER_ID) {
-    return interaction.reply({ content: '❌ This command is for the bot owner only.', ephemeral: true });
-  }
-
-  const action = interaction.options.getString('action');
-  const serverId = interaction.options.getString('server_id');
-  const extraReports = interaction.options.getInteger('reports') || 5;
-
-  // Validate server ID format (Discord snowflake: 17-19 digits)
-  if (!/^\d{17,19}$/.test(serverId)) {
-    return interaction.reply({ content: '❌ Invalid server ID. Must be a 17-19 digit number.', ephemeral: true });
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-  console.log(`🔧 ADMIN: ${action} on server ${serverId} by ${interaction.user.tag}`);
-
-  try {
-    // ── TEST: add extra free reports ──
-    if (action === 'test') {
-      const { data } = await supabase.from('usage').select('reports_used').eq('server_id', serverId).single();
-      const current = data?.reports_used || 0;
-      // Store extra allowance as negative offset in a separate field
-      if (data) {
-        await supabase.from('usage').update({ free_bonus: (data.free_bonus || 0) + extraReports }).eq('server_id', serverId);
-      } else {
-        await supabase.from('usage').insert({ server_id: serverId, reports_used: 0, free_bonus: extraReports, month_start: new Date().toISOString() });
-      }
-      return interaction.editReply(
-        `🧪 **Test mode activated**
-` +
-        `Server: \`${serverId}\`
-` +
-        `Added **${extraReports}** extra free reports on top of their current allowance.`
-      );
-    }
-
-    // ── PRO: activate Pro ──
-    if (action === 'pro') {
-      const expires = new Date();
-      expires.setDate(expires.getDate() + 30);
-      await supabase.from('paid_servers').upsert({
-        server_id: serverId,
-        activated_at: new Date().toISOString(),
-        expires_at: expires.toISOString()
-      });
-      return interaction.editReply(
-        `⚡ **Pro activated**
-` +
-        `Server: \`${serverId}\`
-` +
-        `Expires: **${expires.toDateString()}** (30 days)`
-      );
-    }
-
-    // ── PRO OFF: deactivate Pro ──
-    if (action === 'pro_off') {
-      await supabase.from('paid_servers').delete().eq('server_id', serverId);
-      return interaction.editReply(
-        `🔴 **Pro deactivated**
-` +
-        `Server: \`${serverId}\`
-` +
-        `They are now on the Free tier.`
-      );
-    }
-
-  } catch (err) {
-    console.error('Admin error:', err);
-    return interaction.editReply(`❌ Error: ${err.message}`);
-  }
-}
-
-// ============================================================
-// HTTP SERVER (keeps Railway alive)
-// ============================================================
-
-http.createServer((req, res) => res.end('Vibe Check Bot is running')).listen(process.env.PORT || 3000);
-
-// ============================================================
-// START BOT
-// ============================================================
+  await runVibeAnalysis(interaction, { channel, visibility, sensitivity, timeframe, messageCount, startDate: null, endDate: null });
+});
+
+// Error handling
+process.on('unhandledRejection', (error, promise) => { console.error('❌ Unhandled Rejection:', error); });
+process.on('uncaughtException', error => { console.error('❌ Uncaught Exception:', error); });
+process.on('SIGTERM', () => { console.log('🛑 SIGTERM received'); client.destroy(); process.exit(0); });
+process.on('SIGINT', () => { console.log('🛑 SIGINT received'); client.destroy(); process.exit(0); });
+
+// Keep Railway alive
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('VibeCheck Bot Running');
+}).listen(process.env.PORT || 3000, () => {
+  console.log(`🌐 Health check server on port ${process.env.PORT || 3000}`);
+});
 
 client.login(process.env.DISCORD_TOKEN);
