@@ -185,13 +185,19 @@ async function getServerStatus(serverId) {
     const freeBonus = usageData?.free_bonus || 0;
     const monthStart = usageData?.month_start ? new Date(usageData.month_start) : null;
 
-    if (isPaid && monthStart) {
-      const daysSinceReset = (now.getTime() - monthStart.getTime()) / (1000 * 60 * 60 * 24);
-      if (daysSinceReset >= 30) {
-        // Reset monthly counter
-        reportsUsed = 0;
+    if (isPaid && usageData) {
+      if (!monthStart) {
+        // No month_start (old row or manual insert) — set it now so reset cycle begins
         await supabase.from('usage').update({ reports_used: 0, month_start: now.toISOString() }).eq('server_id', serverId);
-        console.log(`🔄 Monthly reset for server ${serverId}`);
+        reportsUsed = 0;
+        console.log(`🔄 Initialized month_start for Pro server ${serverId}`);
+      } else {
+        const daysSinceReset = (now.getTime() - monthStart.getTime()) / (1000 * 60 * 60 * 24);
+        if (daysSinceReset >= 30) {
+          reportsUsed = 0;
+          await supabase.from('usage').update({ reports_used: 0, month_start: now.toISOString() }).eq('server_id', serverId);
+          console.log(`🔄 Monthly reset for server ${serverId}`);
+        }
       }
     }
 
@@ -214,24 +220,6 @@ async function getServerStatus(serverId) {
     // Safe fallback
     return { isTester: false, isPaid: false, reportsUsed: 0, freeBonus: 0, remaining: CONFIG.FREE_REPORTS, canUse: true, subDaysLeft: 0, usageExists: false, monthStart: Date.now() };
   }
-}
-
-// Kept for admin command compatibility
-async function isPaid(serverId) {
-  try {
-    const { data } = await supabase.from('paid_servers').select('server_id, expires_at').eq('server_id', serverId).single();
-    if (!data) return false;
-    if (data.expires_at && new Date(data.expires_at) < new Date()) return false;
-    return true;
-  } catch { return false; }
-}
-
-async function isTester(serverId) {
-  try {
-    const { data } = await supabase.from('testers').select('expires_at').eq('server_id', serverId).single();
-    if (!data) return false;
-    return new Date(data.expires_at) > new Date();
-  } catch { return false; }
 }
 
 async function incrementUsage(serverId, status) {
@@ -1492,10 +1480,12 @@ async function handleVibeCommand(interaction) {
       await interaction.editReply({ content: null, embeds: [reportEmbed], components: [buttons] });
     }
 
-    // Background tasks
-    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length || 0, sensitivity, timeframe, totalAnalyzed, result.toxicityTypes);
-    await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totalAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length || 0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cost: totalCost, processingTime: totalProcessingTime });
-    await sendEmailReport(serverName, serverId, channelNames, result, totalAnalyzed, timeframeLabel, sensitivity, remaining);
+    // Background tasks — run in parallel, don't await so followUp notifications fire immediately
+    Promise.all([
+      saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length || 0, sensitivity, timeframe, totalAnalyzed, result.toxicityTypes),
+      logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totalAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length || 0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totalInputTokens, outputTokens: totalOutputTokens, cost: totalCost, processingTime: totalProcessingTime }),
+      sendEmailReport(serverName, serverId, channelNames, result, totalAnalyzed, timeframeLabel, sensitivity, remaining)
+    ]).catch(err => console.error('Background task error:', err.message));
 
     const usedNow = status.reportsUsed + 1;
     if (usedNow === 1 && !serverIsPaid && !tester) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
@@ -1656,11 +1646,14 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     if (toxEntries.length > 0) recommendations.push(`⚠️ Top recurring issue: **${toxEntries[0][0]}** (${toxEntries[0][1]} total instances).`);
     if (prediction) recommendations.push(`${prediction.direction === '📈 improving' ? '🟢' : prediction.direction === '📉 declining' ? '🔴' : '⚪'} **Predicted next score: ${prediction.predicted}/10** (trend: ${prediction.direction})`);
 
+    // Chart data capped at 50 most recent to keep QuickChart URLs under limits
+    const chartReports = filteredReports.slice(-50);
+
     // ── GENERATE ALL CHART URLs ───────────────────────────────
-    const scoreTrendUrl   = generateScoreTrendChart(filteredReports);
-    const sentimentUrl    = generateSentimentTrendChart(filteredReports);
+    const scoreTrendUrl   = generateScoreTrendChart(chartReports);
+    const sentimentUrl    = generateSentimentTrendChart(chartReports);
     const toxDoughnutUrl  = generateToxicityDoughnut(toxMap);
-    const toxEvolutionUrl = generateToxicityEvolutionChart(filteredReports);
+    const toxEvolutionUrl = generateToxicityEvolutionChart(chartReports);
     const channelRankUrl  = isMulti ? generateChannelRankingChart(channelStats) : null;
 
     // ── EMBED 1: OVERALL SUMMARY + SCORE TREND CHART ─────────
