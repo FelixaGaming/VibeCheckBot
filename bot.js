@@ -747,12 +747,27 @@ async function registerCommands() {
     .addIntegerOption(o=>o.setName('messages').setDescription('Messages per channel (default: 100)').setRequired(false).addChoices(
       {name:'50',value:50},{name:'100',value:100},{name:'250',value:250},{name:'500',value:500},{name:'1000 (Pro)',value:1000}));
 
-  const progress = new SlashCommandBuilder().setName('vibe-progress').setDescription('Track your community friendliness over time')
-    .addStringOption(o=>o.setName('range').setDescription('Reports to show (default: 10)').setRequired(false).addChoices(
-      {name:'Last 5',value:'5'},{name:'Last 10',value:'10'},{name:'Last 20',value:'20'},{name:'Last 30 days',value:'30d'}))
-    .addChannelOption(o=>o.setName('channel') .setDescription('Filter by channel').setRequired(false).addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(o=>o.setName('channel2').setDescription('Compare channel 2').setRequired(false).addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(o=>o.setName('channel3').setDescription('Compare channel 3').setRequired(false).addChannelTypes(ChannelType.GuildText));
+  const progress = new SlashCommandBuilder()
+  .setName('vibe-progress')
+  .setDescription('Track your community vibe over time')
+  // 1. CHANNEL FILTERS
+  .addChannelOption(o => o.setName('channel').setDescription('Primary channel to analyze').setRequired(false).addChannelTypes(ChannelType.GuildText))
+  .addChannelOption(o => o.setName('channel2').setDescription('Compare second channel').setRequired(false).addChannelTypes(ChannelType.GuildText))
+  .addChannelOption(o => o.setName('channel3').setDescription('Compare third channel').setRequired(false).addChannelTypes(ChannelType.GuildText))
+  // 2. TIMEFRAME FILTERS
+  .addStringOption(o => o.setName('timeframe').setDescription('The window of time to analyze').setRequired(false).addChoices(
+    { name: 'Last 24 Hours', value: '24h' },
+    { name: 'Last 7 Days', value: '7d' },
+    { name: 'Last 14 Days', value: '14d' },
+    { name: 'Last 30 Days', value: '30d' },
+    { name: 'All Time (Last 100)', value: 'all' }
+  ))
+  // 3. SENSITIVITY FILTERS
+  .addStringOption(o => o.setName('sensitivity').setDescription('Filter by analysis strictness used').setRequired(false).addChoices(
+    { name: '🎮 Low — Gaming/Adult', value: 'low' },
+    { name: '⚖️ Medium — General', value: 'medium' },
+    { name: '👶 High — Kids/Family', value: 'high' }
+  ));
 
   const admin = new SlashCommandBuilder().setName('vibe-admin').setDescription('Admin controls (owner only)')
     .addStringOption(o=>o.setName('action').setDescription('Action').setRequired(true).addChoices(
