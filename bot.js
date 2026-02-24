@@ -294,21 +294,28 @@ async function toxBarChart(toxTypes, title) {
 }
 
 async function scoreLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labelCount = {};
+  const labels = reports.map(r => {
+    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    labelCount[d] = (labelCount[d] || 0) + 1;
+    return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
+  });
+  const scores = reports.map(r => typeof r.score === 'number' ? r.score : parseFloat(r.score) || null);
   return await chartUrl({
     type: 'line',
     data: {
       labels,
       datasets: [{
         label: 'Friendliness Score',
-        data: reports.map(r => r.score),
+        data: scores,
         borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.15)',
-        fill: true, tension: 0.35, pointRadius: 5, pointBackgroundColor: '#f97316'
+        fill: true, tension: 0.35, pointRadius: 6, pointBackgroundColor: '#f97316',
+        pointHoverRadius: 8
       }]
     },
     options: {
       plugins: { title: { display: true, text: 'Friendliness Score Over Time', font: { size: 14 } } },
-      scales: { yAxes: [{ ticks: { min: 0, max: 10, stepSize: 1 } }] }
+      scales: { yAxes: [{ ticks: { min: 0, max: 10, stepSize: 1, beginAtZero: false } }] }
     }
   });
 }
@@ -386,14 +393,29 @@ async function cumulativeToxChart(reports) {
 }
 
 async function multiChannelLineChart(reports, allChs) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  // Build unique date labels with index for duplicates
+  const labelCount = {};
+  const labels = reports.map(r => {
+    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    labelCount[d] = (labelCount[d] || 0) + 1;
+    return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
+  });
+
   const colors = ['#f97316','#8b5cf6','#22c55e','#3b82f6','#ef4444','#ec4899','#14b8a6'];
+
   const datasets = allChs.map((ch, i) => {
+    // ch may be like "#test" — match against comma-separated channel_name field
+    const chLower = ch.toLowerCase().trim();
     const data = reports.map(r => {
       if (!r.channel_name) return null;
-      const names = r.channel_name.split(', ');
-      return names.includes(ch) ? r.score : null;
+      // channel_name can be "#test" or "#test, #help, #vibecheck"
+      const names = r.channel_name.split(',').map(n => n.trim().toLowerCase());
+      if (!names.some(n => n === chLower)) return null;
+      // If this report covers multiple channels, we use the global score as approximation
+      return typeof r.score === 'number' ? r.score : parseFloat(r.score) || null;
     });
+    // Only include channel if it has at least one data point
+    if (data.every(d => d === null)) return null;
     return {
       label: ch,
       data,
@@ -401,11 +423,14 @@ async function multiChannelLineChart(reports, allChs) {
       backgroundColor: 'transparent',
       fill: false,
       tension: 0.35,
-      pointRadius: 5,
+      pointRadius: 6,
       pointBackgroundColor: colors[i % colors.length],
       spanGaps: true
     };
-  });
+  }).filter(Boolean);
+
+  if (!datasets.length) return null;
+
   return await chartUrl({
     type: 'line',
     data: { labels, datasets },
@@ -416,7 +441,7 @@ async function multiChannelLineChart(reports, allChs) {
       },
       scales: { yAxes: [{ ticks: { min: 0, max: 10, stepSize: 1 } }] }
     }
-  }, 600, 300);
+  }, 600, 320);
 }
 
 // ============================================================
@@ -572,76 +597,91 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
   const np = Math.round(neutral    / total * 100);
   const up = Math.round(unfriendly / total * 100);
   const isMultiChannel = channelNames.length > 1;
-  const chDisplay = isMultiChannel ? channelNames.join(', ') : channelNames[0];
+  const chDisplay = channelNames.join(', ');
+  const sensLabel = sensitivity === 'low' ? '🎮 Low — Gaming/Adult' : sensitivity === 'high' ? '👶 High — Kids/Family' : '⚖️ Medium — General';
 
+  // ── Section 1: Community Overview ──
   const embed1 = new EmbedBuilder()
     .setColor(scoreColor(score))
-    .setTitle(isMultiChannel ? '📊 Multi-Channel Vibe Report' : '📊 Community Vibe Report')
+    .setTitle(isMultiChannel ? '📊 Vibe Check Report — Multi-Channel Overview' : '📊 Vibe Check Report — Community Overview')
     .setDescription(
-      `**${chDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages • Sensitivity: **${sensitivity.charAt(0).toUpperCase()+sensitivity.slice(1)}**\n\n` +
-      `\`\`\`\n${scoreEmoji(score)}  FRIENDLINESS SCORE: ${score} / 10  — ${scoreLabel(score).toUpperCase()}\n\`\`\`\n` +
-      `\`${scoreBar(score)}\``
+      `_A snapshot of your community's health based on the last ${timeframeLabel} of messages. ` +
+      `${isMultiChannel ? 'Each channel is analyzed individually and combined into a weighted Impact Score.' : 'Higher scores mean a warmer, more welcoming community.'}_`
     )
-    .addFields({ name: '📋 Server Info', value: `👥 Members: **${memberCount||'—'}**`, inline: false });
-
+    .addFields(
+      { name: '📺 Channels Analyzed', value: chDisplay, inline: true },
+      { name: '👥 Members',           value: `**${memberCount||'—'}**`, inline: true },
+      { name: '💬 Messages Evaluated', value: `**${analyzedCount}**`, inline: true },
+      { name: '🕐 Timeframe',         value: `Last **${timeframeLabel}**`, inline: true },
+      { name: '🎛️ Sensitivity',       value: sensLabel, inline: true },
+      { name: '👁️ Visibility',        value: isPublic ? '📢 Public' : '🔒 Private', inline: true },
+      { name: isMultiChannel ? '⚡ Vibe Strength — Impact Score' : '✨ Vibe Strength',
+        value: `**${score}/10** \`${scoreBar(score)}\` — **${scoreLabel(score)}** ${scoreEmoji(score)}`, inline: false }
+    );
   if (result.communityStrengths) embed1.addFields({ name: '✨ Community Strengths', value: result.communityStrengths, inline: false });
-  if (result.summary)            embed1.addFields({ name: '🗒️ Vibe Verdict',         value: result.summary,            inline: false });
-  if (result.recommendation)    embed1.addFields({ name: '💡 Recommendations',       value: result.recommendation,    inline: false });
+  if (result.summary)            embed1.addFields({ name: '🗒️ Vibe Verdict',        value: result.summary, inline: false });
+  if (result.recommendation)    embed1.addFields({ name: '💡 Next Steps',           value: result.recommendation, inline: false });
   embed1.addFields({ name: '🔧 Need Help?', value: `📧 **${CONFIG.CONTACT_EMAIL}**`, inline: false });
-  embed1.setFooter({ text: `Vibe Check Bot • ${isPaidServer?'⚡ Pro':'🎁 Free Trial'} • ${remaining} ${remaining===1?'report':'reports'} remaining • Sensitivity: ${sensitivity}` });
+  embed1.setFooter({ text: `Vibe Check Bot • ${isPaidServer?'⚡ Pro':'🎁 Free Trial'} • ${remaining} ${remaining===1?'report':'reports'} remaining` });
 
-  const embed2 = new EmbedBuilder().setColor(0xf97316).setTitle('🧪 Toxicity Breakdown');
+  // ── Section 2: Per-Channel Vibe Level (multi only) ──
+  let embed2 = null;
+  if (isMultiChannel) {
+    const perChLines = channelNames.map(ch => {
+      const r = channelResults[ch]; if (!r) return `🔘 **${ch}** — not enough data`;
+      const s = r.result.friendlinessScore;
+      return `${s>=7?'🟢':s>=4?'🟡':'🔴'} **${ch}** \`${scoreBar(s)}\` **${s}/10** — ${scoreLabel(s)} (${channelMsgCounts[ch]||0} msgs)`;
+    }).join('\n');
+    embed2 = new EmbedBuilder()
+      .setColor(0x8b5cf6)
+      .setTitle('🧪 Vibe Level Per Channel')
+      .setDescription('_Individual health scores for each channel. 🟢 Thriving channels are your community strengths. 🔴 Channels need focused positive energy._')
+      .addFields({ name: 'Channel Breakdown', value: perChLines, inline: false });
+  }
+
+  // ── Section 3: Toxicity Breakdown ──
+  const embed3 = new EmbedBuilder()
+    .setColor(0xf97316)
+    .setTitle('🧪 Toxicity Breakdown')
+    .setDescription('_Types and volume of harmful content detected. Every flag is an opportunity to strengthen your community norms._');
+
   if (isPublic) {
     const fc = result.flaggedMessages?.length || 0;
-    embed2.setDescription(fc > 0 ? `**${fc} flagged messages** detected.` : '✅ No harmful content detected.');
+    embed3.addFields({ name: fc > 0 ? `⚠️ ${fc} Flagged Messages` : '✅ No Flagged Messages',
+      value: fc > 0 ? 'Full details available in the private report.' : 'No harmful content detected in this timeframe.', inline: false });
     if (fc > 0 && result.toxicityTypes) {
       const tb = Object.entries(result.toxicityTypes).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`• ${k}: ${v}`).join('\n');
-      if (tb) embed2.addFields({ name: 'Types', value: tb.substring(0,1024), inline: false });
+      if (tb) embed3.addFields({ name: 'Issue Types', value: tb.substring(0,1024), inline: false });
     }
   } else {
     if (result.toxicityTypes) {
       const types = Object.entries(result.toxicityTypes).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
       if (types.length > 0) {
         const mv = types[0][1] || 1;
-        embed2.addFields({ name: 'Breakdown', value: types.map(([k,v])=>`\`${'█'.repeat(Math.round(v/mv*8))}${'░'.repeat(8-Math.round(v/mv*8))}\` **${k}**: ${v}`).join('\n'), inline: false });
+        embed3.addFields({ name: 'Cumulative Toxicity Breakdown', value: types.map(([k,v])=>`\`${'█'.repeat(Math.round(v/mv*10))}${'░'.repeat(10-Math.round(v/mv*10))}\` **${k}**: ${v}`).join('\n'), inline: false });
       } else {
-        embed2.setDescription('✅ No toxicity detected.');
+        embed3.addFields({ name: '✅ No Toxicity Detected', value: 'No harmful content found in this timeframe.', inline: false });
       }
     }
     if (result.flaggedMessages?.length > 0) {
       const list = result.flaggedMessages.sort((a,b)=>b.severity-a.severity).slice(0,10)
         .map(f=>`• [\`${f.type}\` ${f.severity}/10] ${f.message.substring(0,80)}${f.message.length>80?'...':''}`).join('\n');
-      embed2.addFields({ name: `⚠️ Flagged Messages (${result.flaggedMessages.length})`, value: list.substring(0,1024), inline: false });
-      if (result.flaggedMessages.length > 10) embed2.addFields({ name: '', value: `_...and ${result.flaggedMessages.length-10} more in the email report_`, inline: false });
+      embed3.addFields({ name: `⚠️ Flagged Messages (${result.flaggedMessages.length})`, value: list.substring(0,1024), inline: false });
+      if (result.flaggedMessages.length > 10) embed3.addFields({ name: '', value: `_...and ${result.flaggedMessages.length-10} more in the email report_`, inline: false });
     } else {
-      embed2.addFields({ name: '✅ No Flagged Messages', value: 'No harmful content detected.', inline: false });
+      embed3.addFields({ name: '✅ No Flagged Messages', value: 'No harmful content detected.', inline: false });
     }
-  }
-  if (!isPublic && result.toxicityTypes) {
-    const tUrl = await toxBarChart(result.toxicityTypes, 'Toxicity Types');
-    if (tUrl) embed2.setImage(tUrl);
+    const tUrl = await toxBarChart(result.toxicityTypes, 'Toxicity Breakdown');
+    if (tUrl) embed3.setImage(tUrl);
   }
 
-  let embed3 = null;
-  if (isMultiChannel) {
-    embed3 = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`⚡ Impact Score: ${score}/10`);
-    embed3.setDescription(`The Impact Score is the **weighted average** across all channels, based on message volume.\nChannels where members spend more time have greater influence on this score.`);
-    embed3.addFields({
-      name: 'Per-Channel Breakdown',
-      value: channelNames.map(ch => {
-        const r = channelResults[ch]; if (!r) return `${ch} — not enough data`;
-        const s = r.result.friendlinessScore;
-        return `${s>=7?'🟢':s>=4?'🟡':'🔴'} **${ch}** \`${scoreBar(s)}\`  **${s}/10** (${channelMsgCounts[ch]||0} msgs)`;
-      }).join('\n'),
-      inline: false
-    });
-  }
-
+  // ── Section 4: Sentiment Breakdown ──
   const embed4 = new EmbedBuilder()
     .setColor(scoreColor(score))
     .setTitle('💬 Sentiment Breakdown')
+    .setDescription('_How messages break down by tone. A healthy community trends green over time. Watch this number grow as your community strengthens._')
     .addFields({
-      name: 'Message Breakdown',
+      name: 'Sentiment Distribution',
       value:
         `🟢 Friendly   \`${String(friendly).padStart(4)}\`  **${fp}%**\n` +
         `⚪ Neutral     \`${String(neutral).padStart(4)}\`  **${np}%**\n` +
@@ -650,19 +690,23 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
     })
     .setImage(await pieChart(friendly, neutral, unfriendly));
 
+  // ── Section 5: Most Reacted Messages ──
   let embed5 = null;
   if (reactions && !isPublic && (reactions.mostReacted || reactions.mostPositive || reactions.mostNegative)) {
-    embed5 = new EmbedBuilder().setColor(0x6366f1).setTitle('💬 Most Reacted Messages');
+    embed5 = new EmbedBuilder()
+      .setColor(0x6366f1)
+      .setTitle('⭐ Top 3 Most Reacted Messages')
+      .setDescription('_The messages that sparked the most engagement. These reveal what your community truly responds to — amplify this energy._');
     const lines = [];
     if (reactions.mostReacted)  lines.push(`⭐ **Most reacted:** "${reactions.mostReacted.text}" — ${reactions.mostReacted.reactions}`);
     if (reactions.mostPositive) lines.push(`👍 **Most positive:** "${reactions.mostPositive.text}" — ${reactions.mostPositive.reactions}`);
     if (reactions.mostNegative) lines.push(`👎 **Most negative:** "${reactions.mostNegative.text}" — ${reactions.mostNegative.reactions}`);
-    embed5.setDescription(lines.join('\n'));
+    embed5.addFields({ name: 'Engagement Highlights', value: lines.join('\n'), inline: false });
   }
 
-  const embeds = [embed1, embed2];
-  if (embed3) embeds.push(embed3);
-  embeds.push(embed4);
+  const embeds = [embed1];
+  if (embed2) embeds.push(embed2);
+  embeds.push(embed3, embed4);
   if (embed5) embeds.push(embed5);
   return embeds;
 }
@@ -909,12 +953,15 @@ function infoRow(label, value) {
 
 async function notifyAdminChannel(embed, buttons) {
   try {
+    console.log(`[ADMIN NOTIFY] Fetching channel ${CONFIG.ADMIN_CHANNEL_ID}...`);
     const ch = await client.channels.fetch(CONFIG.ADMIN_CHANNEL_ID);
-    if (!ch) return;
+    if (!ch) { console.error('[ADMIN NOTIFY] Channel not found!'); return; }
+    console.log(`[ADMIN NOTIFY] Channel found: #${ch.name} in ${ch.guild?.name}. Sending...`);
     const payload = { embeds: [embed] };
     if (buttons) payload.components = [buttons];
     await ch.send(payload);
-  } catch (e) { console.error('Admin channel notify error:', e.message); }
+    console.log('[ADMIN NOTIFY] ✅ Notification sent successfully!');
+  } catch (e) { console.error('[ADMIN NOTIFY] ❌ Error:', e.message); }
 }
 
 // ── New Install ──
