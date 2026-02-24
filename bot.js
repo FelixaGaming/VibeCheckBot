@@ -293,6 +293,46 @@ async function toxBarChart(toxTypes, title) {
   });
 }
 
+async function multiChannelToxChart(channelNames, channelResults) {
+  // Collect all unique toxicity types across all channels
+  const allTypes = new Set();
+  channelNames.forEach(ch => {
+    const r = channelResults[ch];
+    if (r?.result?.toxicityTypes) Object.keys(r.result.toxicityTypes).forEach(t => allTypes.add(t));
+  });
+  const types = [...allTypes].filter(t => {
+    return channelNames.some(ch => (channelResults[ch]?.result?.toxicityTypes?.[t] || 0) > 0);
+  }).slice(0, 6); // max 6 types for readability
+  if (!types.length) return null;
+
+  const colors = ['#f97316','#8b5cf6','#22c55e','#3b82f6','#ef4444','#ec4899','#14b8a6'];
+  const datasets = channelNames.map((ch, i) => {
+    const tox = channelResults[ch]?.result?.toxicityTypes || {};
+    return {
+      label: ch,
+      data: types.map(t => tox[t] || 0),
+      backgroundColor: colors[i % colors.length],
+      borderColor: colors[i % colors.length],
+      borderWidth: 1
+    };
+  });
+
+  return await chartUrl({
+    type: 'bar',
+    data: { labels: types, datasets },
+    options: {
+      plugins: {
+        title: { display: true, text: 'Toxicity Breakdown — Channel Comparison', font: { size: 14 } },
+        legend: { position: 'bottom' }
+      },
+      scales: {
+        xAxes: [{ stacked: false }],
+        yAxes: [{ ticks: { beginAtZero: true } }]
+      }
+    }
+  }, 600, 320);
+}
+
 async function scoreLineChart(reports) {
   const labelCount = {};
   const labels = reports.map(r => {
@@ -615,7 +655,7 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
       { name: '🕐 Timeframe',         value: `Last **${timeframeLabel}**`, inline: true },
       { name: '🎛️ Sensitivity',       value: sensLabel, inline: true },
       { name: '👁️ Visibility',        value: isPublic ? '📢 Public' : '🔒 Private', inline: true },
-      { name: isMultiChannel ? '⚡ Vibe Strength — Impact Score' : '✨ Vibe Strength',
+      { name: isMultiChannel ? '⚡ Overall Vibe Score' : '✨ Vibe Strength',
         value: `**${score}/10** \`${scoreBar(score)}\` — **${scoreLabel(score)}** ${scoreEmoji(score)}`, inline: false }
     );
   if (result.communityStrengths) embed1.addFields({ name: '✨ Community Strengths', value: result.communityStrengths, inline: false });
@@ -626,6 +666,7 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
 
   // ── Section 2: Per-Channel Vibe Level (multi only) ──
   let embed2 = null;
+  let embed2b = null;
   if (isMultiChannel) {
     const perChLines = channelNames.map(ch => {
       const r = channelResults[ch]; if (!r) return `🔘 **${ch}** — not enough data`;
@@ -637,6 +678,18 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
       .setTitle('🧪 Vibe Level Per Channel')
       .setDescription('_Individual health scores for each channel. 🟢 Thriving channels are your community strengths. 🔴 Channels need focused positive energy._')
       .addFields({ name: 'Channel Breakdown', value: perChLines, inline: false });
+
+    // Toxicity comparison chart — one bar per channel per toxicity type
+    if (!isPublic) {
+      const toxChartUrl = await multiChannelToxChart(channelNames, channelResults);
+      if (toxChartUrl) {
+        embed2b = new EmbedBuilder()
+          .setColor(0xf97316)
+          .setTitle('📊 Chart: Toxicity Comparison — All Channels')
+          .setDescription('_Side-by-side toxicity breakdown per channel. Each bar group represents a toxicity type, and each color represents a channel. Use this to identify which channels have specific issues._')
+          .setImage(toxChartUrl);
+      }
+    }
   }
 
   // ── Section 3: Toxicity Breakdown ──
@@ -706,6 +759,7 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
 
   const embeds = [embed1];
   if (embed2) embeds.push(embed2);
+  if (embed2b) embeds.push(embed2b);
   embeds.push(embed3, embed4);
   if (embed5) embeds.push(embed5);
   return embeds;
