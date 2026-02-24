@@ -49,7 +49,8 @@ const CONFIG = {
   COOLDOWN_SECONDS: 15,
   SERVER_THROTTLE_PER_MINUTE: 10,
   COST_PER_1M_INPUT_TOKENS:  0.15,
-  COST_PER_1M_OUTPUT_TOKENS: 0.60
+  COST_PER_1M_OUTPUT_TOKENS: 0.60,
+  ADMIN_CHANNEL_ID: "1468063704196186145"
 };
 
 // ============================================================
@@ -863,22 +864,242 @@ async function sendEmailReport(serverName, serverId, channelNames, result, analy
   } catch (e) { console.error('Email error:', e.message); }
 }
 
-async function sendNewTrialEmail(serverName, serverId, userName) {
-  try {
-    await resend.emails.send({ from: 'Vibe Check Bot <noreply@vibecheckbot.com>', to: CONFIG.REPORT_EMAIL,
-      subject: `New Free Trial: ${serverName}`,
-      html: `<h2>New Free Trial</h2><p><strong>Server:</strong> ${serverName} (${serverId})</p><p><strong>By:</strong> ${userName}</p>`
-    });
-  } catch (e) { console.error('New trial email error:', e.message); }
+// ============================================================
+// ADMIN NOTIFICATION SYSTEM
+// ============================================================
+
+function adminEmail(subject, headerColor, headerTitle, bodyHtml) {
+  return resend.emails.send({
+    from: 'Vibe Check Bot <reports@vibecheckbot.com>',
+    to: CONFIG.REPORT_EMAIL,
+    subject,
+    html: `<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif">
+<div style="max-width:580px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)">
+  <div style="background:${headerColor};padding:28px 36px">
+    <h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">${headerTitle}</h1>
+    <div style="margin-top:6px;color:rgba(255,255,255,0.85);font-size:13px">${new Date().toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+  </div>
+  <div style="padding:28px 36px">${bodyHtml}</div>
+  <div style="padding:16px 36px;background:#f9fafb;text-align:center;font-size:12px;color:#9ca3af">Vibe Check Bot Admin Alerts &nbsp;•&nbsp; go@vibecheckbot.com</div>
+</div>
+</body>
+</html>`
+  });
 }
 
-async function sendTrialEndedEmail(serverName, serverId, userName) {
+function infoRow(label, value) {
+  return `<tr>
+    <td style="padding:10px 0;color:#6b7280;font-size:14px;border-bottom:1px solid #f3f4f6;width:40%">${label}</td>
+    <td style="padding:10px 0;font-weight:600;color:#111827;font-size:14px;border-bottom:1px solid #f3f4f6">${value}</td>
+  </tr>`;
+}
+
+async function notifyAdminChannel(embed, buttons) {
   try {
-    await resend.emails.send({ from: 'Vibe Check Bot <noreply@vibecheckbot.com>', to: CONFIG.REPORT_EMAIL,
-      subject: `Trial Ended: ${serverName}`,
-      html: `<h2>Trial Ended</h2><p><strong>Server:</strong> ${serverName} (${serverId})</p><p><strong>By:</strong> ${userName}</p>`
-    });
+    const ch = await client.channels.fetch(CONFIG.ADMIN_CHANNEL_ID);
+    if (!ch) return;
+    const payload = { embeds: [embed] };
+    if (buttons) payload.components = [buttons];
+    await ch.send(payload);
+  } catch (e) { console.error('Admin channel notify error:', e.message); }
+}
+
+// ── New Install ──
+async function notifyNewInstall(guild) {
+  const sid = guild.id, name = guild.name, members = guild.memberCount;
+
+  // Discord alert with action buttons
+  const embed = new EmbedBuilder()
+    .setColor(0x22c55e)
+    .setTitle('🎉 New Server Installed Vibe Check Bot!')
+    .addFields(
+      { name: 'Server', value: name, inline: true },
+      { name: 'Members', value: `${members}`, inline: true },
+      { name: 'Server ID', value: `\`${sid}\``, inline: false },
+      { name: 'Free Reports', value: `${CONFIG.FREE_REPORTS} reports available`, inline: true },
+      { name: 'Status', value: '🟢 Free Trial', inline: true }
+    )
+    .setFooter({ text: `Installed at ${new Date().toLocaleString()}` });
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin_tester_${sid}`).setLabel('🧪 Give Tester Access').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`admin_pro_${sid}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`admin_bonus_${sid}`).setLabel('➕ Add 5 Reports').setStyle(ButtonStyle.Secondary)
+  );
+
+  await notifyAdminChannel(embed, buttons);
+
+  // Email alert
+  try {
+    await adminEmail(
+      `🎉 New Install — ${name} (${members} members)`,
+      'linear-gradient(135deg,#22c55e,#16a34a)',
+      '🎉 New Server Installed Vibe Check Bot!',
+      `<table style="width:100%;border-collapse:collapse">
+        ${infoRow('Server Name', name)}
+        ${infoRow('Server ID', sid)}
+        ${infoRow('Member Count', members)}
+        ${infoRow('Free Reports', CONFIG.FREE_REPORTS)}
+        ${infoRow('Status', '🟢 Free Trial Started')}
+      </table>
+      <div style="margin-top:20px;padding:16px;background:#f0fdf4;border-radius:10px;font-size:14px;color:#15803d">
+        Use <strong>/vibe-admin action:tester server_id:${sid}</strong> to give unlimited tester access, or <strong>action:pro</strong> to activate Pro.
+      </div>`
+    );
+  } catch (e) { console.error('New install email error:', e.message); }
+}
+
+// ── Server Uninstalled ──
+async function notifyUninstall(guild) {
+  const embed = new EmbedBuilder()
+    .setColor(0xef4444)
+    .setTitle('👋 Server Removed Vibe Check Bot')
+    .addFields(
+      { name: 'Server', value: guild.name, inline: true },
+      { name: 'Members', value: `${guild.memberCount}`, inline: true },
+      { name: 'Server ID', value: `\`${guild.id}\``, inline: false }
+    )
+    .setFooter({ text: `Removed at ${new Date().toLocaleString()}` });
+
+  await notifyAdminChannel(embed, null);
+
+  try {
+    await adminEmail(
+      `👋 Uninstall — ${guild.name}`,
+      'linear-gradient(135deg,#ef4444,#dc2626)',
+      '👋 Server Removed Vibe Check Bot',
+      `<table style="width:100%;border-collapse:collapse">
+        ${infoRow('Server Name', guild.name)}
+        ${infoRow('Server ID', guild.id)}
+        ${infoRow('Member Count', guild.memberCount)}
+        ${infoRow('Removed At', new Date().toLocaleString())}
+      </table>`
+    );
+  } catch (e) { console.error('Uninstall email error:', e.message); }
+}
+
+// ── First Report (Trial Started) ──
+async function sendNewTrialEmail(serverName, serverId, userName) {
+  const embed = new EmbedBuilder()
+    .setColor(0x3b82f6)
+    .setTitle('🚀 Server Ran First /vibe Report!')
+    .addFields(
+      { name: 'Server', value: serverName, inline: true },
+      { name: 'Triggered By', value: userName, inline: true },
+      { name: 'Server ID', value: `\`${serverId}\``, inline: false },
+      { name: 'Reports Used', value: '1 of 5 free', inline: true },
+      { name: 'Remaining', value: `${CONFIG.FREE_REPORTS - 1}`, inline: true }
+    )
+    .setFooter({ text: new Date().toLocaleString() });
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Give Tester Access').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Add 5 Reports').setStyle(ButtonStyle.Secondary)
+  );
+
+  await notifyAdminChannel(embed, buttons);
+
+  try {
+    await adminEmail(
+      `🚀 First Report — ${serverName}`,
+      'linear-gradient(135deg,#3b82f6,#2563eb)',
+      '🚀 Server Ran Their First /vibe Report!',
+      `<table style="width:100%;border-collapse:collapse">
+        ${infoRow('Server Name', serverName)}
+        ${infoRow('Server ID', serverId)}
+        ${infoRow('Triggered By', userName)}
+        ${infoRow('Reports Used', '1 of 5 free')}
+        ${infoRow('Reports Remaining', CONFIG.FREE_REPORTS - 1)}
+      </table>`
+    );
+  } catch (e) { console.error('First report email error:', e.message); }
+}
+
+// ── Trial Exhausted (5/5 used) ──
+async function sendTrialEndedEmail(serverName, serverId, userName) {
+  const embed = new EmbedBuilder()
+    .setColor(0xf59e0b)
+    .setTitle('⚠️ Server Hit Free Trial Limit!')
+    .setDescription('They have used all 5 free reports. Extend their trial or let them upgrade.')
+    .addFields(
+      { name: 'Server', value: serverName, inline: true },
+      { name: 'Triggered By', value: userName, inline: true },
+      { name: 'Server ID', value: `\`${serverId}\``, inline: false },
+      { name: 'Reports Used', value: `5 / 5 ⛔`, inline: true },
+      { name: 'Action Needed', value: '👇 Extend, activate Pro, or let paywall handle it', inline: false }
+    )
+    .setFooter({ text: new Date().toLocaleString() });
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Extend Trial (+5)').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Give Tester Access').setStyle(ButtonStyle.Secondary)
+  );
+
+  await notifyAdminChannel(embed, buttons);
+
+  try {
+    await adminEmail(
+      `⚠️ Trial Exhausted — ${serverName} needs extension`,
+      'linear-gradient(135deg,#f59e0b,#d97706)',
+      '⚠️ Server Hit Their Free Trial Limit!',
+      `<table style="width:100%;border-collapse:collapse">
+        ${infoRow('Server Name', serverName)}
+        ${infoRow('Server ID', serverId)}
+        ${infoRow('Triggered By', userName)}
+        ${infoRow('Reports Used', '5 / 5 — Trial Exhausted')}
+        ${infoRow('Action Needed', 'Extend trial or wait for them to upgrade')}
+      </table>
+      <div style="margin-top:20px;padding:16px;background:#fffbeb;border-radius:10px;font-size:14px;color:#92400e">
+        To extend: <strong>/vibe-admin action:test server_id:${serverId} reports:5</strong><br>
+        To activate Pro: <strong>/vibe-admin action:pro server_id:${serverId}</strong>
+      </div>`
+    );
   } catch (e) { console.error('Trial ended email error:', e.message); }
+}
+
+// ── Pro Upgrade Interest (clicked upgrade button) ──
+async function notifyUpgradeInterest(serverId, serverName, userName, memberCount) {
+  const embed = new EmbedBuilder()
+    .setColor(0x8b5cf6)
+    .setTitle('💜 Server Clicked Upgrade to Pro!')
+    .setDescription('They hit the paywall and tapped the upgrade button — high purchase intent.')
+    .addFields(
+      { name: 'Server', value: serverName, inline: true },
+      { name: 'Members', value: `${memberCount}`, inline: true },
+      { name: 'Clicked By', value: userName, inline: true },
+      { name: 'Server ID', value: `\`${serverId}\``, inline: false }
+    )
+    .setFooter({ text: new Date().toLocaleString() });
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`admin_pro_${serverId}`).setLabel('⚡ Activate Pro Manually').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`admin_bonus_${serverId}`).setLabel('➕ Give Bonus Reports').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`admin_tester_${serverId}`).setLabel('🧪 Give Tester Access').setStyle(ButtonStyle.Secondary)
+  );
+
+  await notifyAdminChannel(embed, buttons);
+
+  try {
+    await adminEmail(
+      `💜 Upgrade Interest — ${serverName} (${memberCount} members)`,
+      'linear-gradient(135deg,#8b5cf6,#7c3aed)',
+      '💜 Server Clicked Upgrade to Pro!',
+      `<table style="width:100%;border-collapse:collapse">
+        ${infoRow('Server Name', serverName)}
+        ${infoRow('Server ID', serverId)}
+        ${infoRow('Member Count', memberCount)}
+        ${infoRow('Clicked By', userName)}
+        ${infoRow('Intent', '🔥 High — clicked upgrade button')}
+      </table>
+      <div style="margin-top:20px;padding:16px;background:#f5f3ff;border-radius:10px;font-size:14px;color:#5b21b6">
+        Consider reaching out to offer a deal or activate Pro manually to close them.
+      </div>`
+    );
+  } catch (e) { console.error('Upgrade interest email error:', e.message); }
 }
 
 // ============================================================
@@ -938,18 +1159,23 @@ client.once('clientReady', c => {
 });
 
 client.on('guildCreate', async guild => {
-  console.log(`Joined: ${guild.name}`);
+  console.log(`Joined: ${guild.name} (${guild.id})`);
+  // Welcome message in server
   try {
     const ch = guild.systemChannel || guild.channels.cache.find(c => c.type===ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has('SendMessages'));
-    if (!ch) return;
-    await ch.send({ embeds: [new EmbedBuilder().setColor(0xF97316).setTitle('👋 Vibe Check Bot has arrived!')
+    if (ch) await ch.send({ embeds: [new EmbedBuilder().setColor(0xF97316).setTitle('👋 Vibe Check Bot has arrived!')
       .setDescription('Use `/vibe` to check how friendly your community is.\n\nAnalyze multiple channels:\n`/vibe channel:#general channel2:#gaming`')
       .addFields({name:'🎮 Low',value:'Gaming/Adult',inline:true},{name:'⚖️ Medium',value:'General',inline:true},{name:'👶 High',value:'Kids/Family',inline:true})
       .setFooter({text:'How friendly is your community?'})] });
-  } catch (e) { console.error('guildCreate error:', e.message); }
+  } catch (e) { console.error('Welcome message error:', e.message); }
+  // Notify admin
+  await notifyNewInstall(guild);
 });
 
-client.on('guildDelete', g => console.log(`Removed from: ${g.name} (${g.id})`));
+client.on('guildDelete', async guild => {
+  console.log(`Removed from: ${guild.name} (${guild.id})`);
+  await notifyUninstall(guild);
+});
 
 // ============================================================
 // INTERACTIONS
@@ -957,6 +1183,43 @@ client.on('guildDelete', g => console.log(`Removed from: ${g.name} (${g.id})`));
 
 client.on('interactionCreate', async interaction => {
   try {
+    // ── Admin action buttons ──
+    if (interaction.isButton() && interaction.user.id === CONFIG.OWNER_ID) {
+      const id = interaction.customId;
+      if (id.startsWith('admin_tester_') || id.startsWith('admin_pro_') || id.startsWith('admin_bonus_') || id.startsWith('admin_prooff_')) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const parts = id.split('_');
+        const action = parts.slice(0, parts.length - 1).join('_').replace('admin_', '');
+        const sid = parts[parts.length - 1];
+        try {
+          if (action === 'tester') {
+            const exp = new Date(Date.now()+14*86400000);
+            await supabase.from('testers').upsert({ server_id: sid, approved_at: new Date().toISOString(), expires_at: exp.toISOString() });
+            await interaction.editReply(`✅ Tester access granted to \`${sid}\` — expires **${exp.toDateString()}**`);
+          } else if (action === 'pro') {
+            const exp = new Date(); exp.setDate(exp.getDate()+30);
+            await supabase.from('paid_servers').upsert({ server_id: sid, activated_at: new Date().toISOString(), expires_at: exp.toISOString() });
+            await interaction.editReply(`✅ Pro activated for \`${sid}\` — expires **${exp.toDateString()}**`);
+          } else if (action === 'bonus') {
+            const { data } = await supabase.from('usage').select('free_bonus').eq('server_id', sid).single().catch(()=>({data:null}));
+            if (data) await supabase.from('usage').update({ free_bonus: (data.free_bonus||0)+5 }).eq('server_id', sid);
+            else await supabase.from('usage').insert({ server_id: sid, reports_used: 0, free_bonus: 5, month_start: new Date().toISOString() });
+            await interaction.editReply(`✅ Added 5 bonus reports to \`${sid}\``);
+          } else if (action === 'prooff') {
+            await supabase.from('paid_servers').delete().eq('server_id', sid);
+            await interaction.editReply(`✅ Pro deactivated for \`${sid}\``);
+          }
+          // Update the original alert message to show action taken
+          try {
+            await interaction.message.edit({ components: [] });
+          } catch {}
+        } catch (e) {
+          await interaction.editReply(`❌ Error: ${e.message}`);
+        }
+        return;
+      }
+    }
+
     if (interaction.isButton() && interaction.customId === 'view_progress') {
       await handleProgressCommand(interaction, '10', []);
       return;
@@ -1025,6 +1288,7 @@ async function handleVibeCommand(interaction) {
       return interaction.reply({ embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('Monthly Limit Reached').setDescription(`All ${CONFIG.PRO_REPORTS_PER_MONTH} reports used. Resets in **${dLeft} day${dLeft===1?'':'s'}**.`)], flags: MessageFlags.Ephemeral });
     } else {
       await sendTrialEndedEmail(serverName, serverId, interaction.user.tag);
+      notifyUpgradeInterest(serverId, serverName, interaction.user.tag, interaction.guild.memberCount).catch(()=>{});
       return interaction.reply({
         embeds: [new EmbedBuilder().setColor(0xf59e0b).setTitle('Free Trial Ended').setDescription(`All **${CONFIG.FREE_REPORTS}** free reports used.`)
           .addFields({name:'Upgrade to Pro',value:`30 reports/month • Multi-channel`},{name:'Monthly',value:`[$8.99/mo](${CONFIG.STRIPE_MONTHLY_LINK})`,inline:true},{name:'Yearly',value:`[$99/yr](${CONFIG.STRIPE_YEARLY_LINK})`,inline:true})],
