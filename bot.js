@@ -373,6 +373,40 @@ function cumulativeToxChart(reports) {
   return toxBarChart(toxMap, 'Cumulative Toxicity Breakdown');
 }
 
+function multiChannelLineChart(reports, allChs) {
+  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const colors = ['#f97316','#8b5cf6','#22c55e','#3b82f6','#ef4444','#ec4899','#14b8a6'];
+  const datasets = allChs.map((ch, i) => {
+    const data = reports.map(r => {
+      if (!r.channel_name) return null;
+      const names = r.channel_name.split(', ');
+      return names.includes(ch) ? r.score : null;
+    });
+    return {
+      label: ch,
+      data,
+      borderColor: colors[i % colors.length],
+      backgroundColor: 'transparent',
+      fill: false,
+      tension: 0.35,
+      pointRadius: 5,
+      pointBackgroundColor: colors[i % colors.length],
+      spanGaps: true
+    };
+  });
+  return chartUrl({
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      plugins: {
+        title: { display: true, text: 'Vibe Level Trajectory — All Channels', font: { size: 14 } },
+        legend: { position: 'bottom' }
+      },
+      scales: { yAxes: [{ ticks: { min: 0, max: 10, stepSize: 1 } }] }
+    }
+  }, 600, 300);
+}
+
 // ============================================================
 // BEHAVIOR PROBABILITY CALCULATOR
 // ============================================================
@@ -1122,6 +1156,7 @@ async function handleVibeCommand(interaction) {
 // ============================================================
 
 async function handleProgressCommand(interaction, range, filterChannels) {
+
   const serverId = interaction.guildId;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -1196,13 +1231,13 @@ async function handleProgressCommand(interaction, range, filterChannels) {
 
     const e1 = new EmbedBuilder()
       .setColor(0x5865F2)
-      .setTitle('📊 Vibe Check Progress Report')
-      .setDescription(`**Date:** ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})} | **Timeframe:** ${timeframeLabel}\n**Range:** ${dateFrom} → ${dateTo}`)
+      .setTitle('📊 Vibe Check Progress Report — Section 1: Community Overview')
+      .setDescription(`_A snapshot of your entire community's health across the selected timeframe. Use this section to understand the scale of your data and your community's current standing._\n\n**Date:** ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})} | **Timeframe:** ${timeframeLabel}\n**Range:** ${dateFrom} → ${dateTo}`)
       .addFields(
         { name: '📺 Channels Analyzed', value: chListValue, inline: false },
         { name: '👥 Server Member Count', value: `**${interaction.guild.memberCount}** members`, inline: true },
         { name: '💬 Total Messages Evaluated', value: `**${totalMessages}** messages across ${filtered.length} report${filtered.length===1?'':'s'}`, inline: true },
-        { name: '✨ Vibe Strength (Global Weighted Average)', value: vibeGlobal, inline: false }
+        { name: '✨ Vibe Strength — Global Weighted Average', value: vibeGlobal, inline: false }
       )
       .setFooter({ text: `Vibe Check Bot  •  Run /vibe regularly to increase prediction accuracy` });
 
@@ -1218,72 +1253,81 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     const flagSummary = `First report: **${fFlag}** flagged | Latest: **${lFlag}** flagged\n` +
       (lFlag < fFlag ? `✅ Down ${fFlag-lFlag} — great progress` : lFlag > fFlag ? `⚠️ Up ${lFlag-fFlag} — opportunity to reinforce positive norms` : '➡️ Stable');
 
-    // Top 3 most reacted (stored in reports as most_reacted if available, else note N/A)
     const topReacted = filtered
       .filter(r => r.most_reacted_message)
       .slice(-3)
       .map((r,i) => `${i+1}. "${r.most_reacted_message.substring(0,80)}"`)
       .join('\n') || '_Not tracked in current data — future reports will include this._';
 
-    const e2 = new EmbedBuilder()
+    const e2_tox = new EmbedBuilder()
       .setColor(0xf97316)
-      .setTitle('📈 General Trend Analysis')
+      .setTitle('📈 Section 2 — General Trend Analysis')
+      .setDescription('_A high-level view of how your community has evolved across all reports. This section combines score trends, toxicity patterns, sentiment shifts, and flagged message history into one comprehensive overview._')
       .addFields(
         { name: '📉 Vibe Strength Over Time', value: `Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** | Avg: **${avg}/10**\n${diff>0?`📈 Up +${diff} pts`:diff<0?`📉 Down ${diff} pts`:'➡️ Stable'}`, inline: false },
         { name: '🧪 Cumulative Toxicity Breakdown', value: toxText, inline: false },
         { name: '⭐ Top 3 Most Reacted Messages', value: topReacted, inline: false },
         { name: '💬 Sentiment Evolution', value: sentimentSummary, inline: false },
         { name: '🚩 Flagged Messages Trend', value: flagSummary, inline: false }
-      )
+      );
+
+    // ── SECTION 2 chart embeds — each with title + explanation ──
+
+    // Chart 1: Multi-channel trajectory
+    const multiChUrl = multiChannelLineChart(filtered, allChs);
+    const eChart1 = new EmbedBuilder()
+      .setColor(0xf97316)
+      .setTitle('📊 Chart: Vibe Level Trajectory — All Channels')
+      .setDescription('_Each line represents one channel. Shows how every channel\'s friendliness score has moved over time, making it easy to spot which channels are improving and which are declining._')
+      .setImage(multiChUrl);
+
+    // Chart 2: Global score over time
+    const eChart2 = new EmbedBuilder()
+      .setColor(0xf97316)
+      .setTitle('📊 Chart: Global Vibe Strength Over Time')
+      .setDescription('_The weighted average friendliness score across your entire community. Higher is healthier. Use this to track whether your overall community health is trending up or down._')
       .setImage(scoreLineChart(filtered));
 
-    // Sentiment stacked chart as second image embed
-    const e2b = new EmbedBuilder()
+    // Chart 3: Cumulative toxicity
+    const toxChartUrl = cumulativeToxChart(filtered);
+    const eChart3 = toxChartUrl
+      ? new EmbedBuilder()
+          .setColor(0xf97316)
+          .setTitle('📊 Chart: Cumulative Toxicity Breakdown')
+          .setDescription('_Total count of each type of harmful content found across all analyzed reports. The longest bar is your community\'s most common issue — a good place to focus your energy._')
+          .setImage(toxChartUrl)
+      : null;
+
+    // Chart 4: Sentiment stacked
+    const eChart4 = new EmbedBuilder()
       .setColor(0xf97316)
+      .setTitle('📊 Chart: Sentiment Evolution')
+      .setDescription('_Stacked bars showing the percentage of Friendly (green), Neutral (grey), and Unfriendly (red) messages per report. Watch the green grow and the red shrink over time as your community improves._')
       .setImage(sentimentStackedChart(filtered));
 
-    // Flagged chart
-    const e2c = new EmbedBuilder()
+    // Chart 5: Flagged messages trend
+    const eChart5 = new EmbedBuilder()
       .setColor(0xf97316)
+      .setTitle('📊 Chart: Flagged Messages Over Time')
+      .setDescription('_Number of harmful messages flagged per report. A downward trend means your community standards are strengthening. Spikes are early warning signals to act on._')
       .setImage(flaggedLineChart(filtered));
 
-    // Tox chart
-    const toxChartUrl = cumulativeToxChart(filtered);
-    if (toxChartUrl) e2.setImage(toxChartUrl); // override score chart with tox chart; score chart goes on e2b
-
-    // Rebuild with proper chart order
-    const e2_tox = new EmbedBuilder().setColor(0xf97316).setTitle('📈 General Trend Analysis')
-      .addFields(
-        { name: '📉 Vibe Strength Over Time', value: `Oldest: **${oldest.score}/10** → Latest: **${latest.score}/10** | Avg: **${avg}/10**\n${diff>0?`📈 Up +${diff} pts`:diff<0?`📉 Down ${diff} pts`:'➡️ Stable'}`, inline: false },
-        { name: '🧪 Cumulative Toxicity Breakdown', value: toxText, inline: false },
-        { name: '⭐ Top 3 Most Reacted Messages', value: topReacted, inline: false },
-        { name: '💬 Sentiment Evolution', value: sentimentSummary, inline: false },
-        { name: '🚩 Flagged Messages Trend', value: flagSummary, inline: false }
-      )
-      .setImage(scoreLineChart(filtered));
-
-    const e2_sentiment = new EmbedBuilder().setColor(0xf97316).setImage(sentimentStackedChart(filtered));
-    const e2_flagged   = new EmbedBuilder().setColor(0xf97316).setImage(flaggedLineChart(filtered));
-    const e2_tox_chart = toxChartUrl ? new EmbedBuilder().setColor(0xf97316).setImage(toxChartUrl) : null;
-
-    // ── SECTION 3: Trend Analysis Per Channel ──
+    // ── SECTION 3: Per-Channel ──
     const perChLines = allChs.map(ch => {
       const chReports = sorted.filter(r => r.channel_name===ch);
       if (!chReports.length) return null;
-      const cl = chReports[chReports.length-1].score;
-      const co = chReports[0].score;
-      const cd = parseFloat((cl-co).toFixed(1));
+      const cl  = chReports[chReports.length-1].score;
+      const co  = chReports[0].score;
+      const cd  = parseFloat((cl-co).toFixed(1));
       const msgs = chMsgTotals[ch];
       return `${cl>=7?'🟢':cl>=4?'🟡':'🔴'} **${ch}**\n\`${scoreBar(cl)}\` **${cl}/10** | Messages: ${msgs} | ${cd>0?`📈 +${cd} pts`:cd<0?`📉 ${cd} pts`:'➡️ Stable'}`;
     }).filter(Boolean);
 
     const e3 = new EmbedBuilder()
       .setColor(0x8b5cf6)
-      .setTitle('🧪 Trend Analysis Per Channel')
-      .setDescription('Individual channel health trajectories — which channels are flourishing and which need attention.')
-      .addFields(
-        { name: 'Per-Channel Breakdown', value: perChLines.length ? perChLines.join('\n\n') : 'Only one channel tracked so far.', inline: false }
-      )
+      .setTitle('🧪 Section 3 — Trend Analysis Per Channel')
+      .setDescription('_A detailed breakdown of each individual channel\'s health. Channels shown in 🟢 green are flourishing. 🟡 Yellow channels need encouragement. 🔴 Red channels need focused community-building attention._')
+      .addFields({ name: 'Per-Channel Breakdown', value: perChLines.length ? perChLines.join('\n\n') : 'Only one channel tracked so far.', inline: false })
       .setImage(impactLineChart(filtered));
 
     // ── SECTION 4: Predictive Analytics ──
@@ -1297,10 +1341,10 @@ async function handleProgressCommand(interaction, range, filterChannels) {
       else if (m >= -1) predLines.push(`🟡 **Slight downward drift** — a good moment to reinvigorate engagement.`);
       else              predLines.push(`🔴 **Declining momentum** — invest in member recognition and shared goals now.`);
     }
-    if (uDelta > 5)        predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — highlight your most positive members to reset the tone.`);
-    else if (uDelta < -5)  predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — community norms are strengthening.`);
+    if (uDelta > 5)       predLines.push(`⚠️ **Unfriendly behavior rising** (${uFirst}% → ${uLast}%) — highlight your most positive members to reset the tone.`);
+    else if (uDelta < -5) predLines.push(`✅ **Positive behavior increasing** (${uFirst}% → ${uLast}%) — community norms are strengthening.`);
     if (lFlag > fFlag*1.5 && lFlag > 2) predLines.push(`🚨 **Flagged messages spiking** — double down on celebrating what makes your community great.`);
-    else if (lFlag === 0)  predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
+    else if (lFlag === 0) predLines.push(`✨ **Zero harmful content** in latest report — your community standards are working beautifully.`);
 
     let probText = 'Run at least 2 reports to unlock probability forecasts.';
     if (prob) {
@@ -1313,7 +1357,8 @@ async function handleProgressCommand(interaction, range, filterChannels) {
 
     const e4 = new EmbedBuilder()
       .setColor(0x3b82f6)
-      .setTitle('🔮 Predictive Analytics')
+      .setTitle('🔮 Section 4 — Predictive Analytics')
+      .setDescription('_Using momentum, sentiment trends, flagged message patterns, and toxicity severity, the bot calculates the probability your community will improve or worsen in the next reporting period. The more reports you run, the more accurate this becomes._')
       .addFields(
         { name: '📊 Behavior Forecast', value: probText, inline: false }
       );
@@ -1329,7 +1374,6 @@ async function handleProgressCommand(interaction, range, filterChannels) {
     else if (fLast >= 50)  recLines.push(`🌱 **Build on ${fLast}% friendly** — create more opportunities for members to connect over shared interests.`);
     else                   recLines.push(`❤️ **Focus on belonging** — welcoming new members publicly can shift community culture over time.`);
 
-    // Per-channel specific advice
     const chAdvice = allChs.map(ch => {
       const s = chLatestScore[ch];
       if (s === null) return null;
@@ -1354,18 +1398,19 @@ async function handleProgressCommand(interaction, range, filterChannels) {
 
     const e5 = new EmbedBuilder()
       .setColor(0x22c55e)
-      .setTitle('💡 Next Steps')
+      .setTitle('💡 Section 5 — Next Steps')
+      .setDescription('_Strengths-based, actionable advice tailored to your community\'s current data. Every suggestion is rooted in positive psychology — focused on amplifying what\'s working, not punishing what isn\'t._')
       .addFields(
         { name: '🎯 Community-Wide Actions', value: recLines.join('\n'), inline: false }
       );
     if (chAdvice.length) e5.addFields({ name: '📺 Per-Channel Advice', value: chAdvice.join('\n'), inline: false });
-    e5.addFields({ name: '📅 Mandatory Reminder', value: '> Always run these reports on a regular basis to increase prediction accuracy and track long-term community growth.', inline: false });
+    e5.addFields({ name: '📅 Mandatory Reminder', value: '> Run `/vibe` regularly across all your channels. The more data points collected, the more accurate the predictions and the clearer your community\'s growth story becomes.', inline: false });
     e5.setFooter({ text: `Vibe Check Bot  •  ${filtered.length} reports analyzed  •  Keep going!` });
 
-    // Build final embed list
-    const embeds = [e1, e2_tox, e2_sentiment, e2_flagged];
-    if (e2_tox_chart) embeds.push(e2_tox_chart);
-    embeds.push(e3, e4, e5);
+    // ── Final embed list ──
+    const embeds = [e1, e2_tox, eChart1, eChart2];
+    if (eChart3) embeds.push(eChart3);
+    embeds.push(eChart4, eChart5, e3, e4, e5);
 
     await interaction.editReply({ embeds });
 
