@@ -629,7 +629,7 @@ function scoreLabel(s) { return s >= 8 ? 'Excellent' : s >= 6 ? 'Good' : s >= 4 
 // BUILD /vibe EMBEDS
 // ============================================================
 
-async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions, isPublic, channelMsgCounts, channelResults, memberCount) {
+async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions, isPublic, channelMsgCounts, channelResults, memberCount, reactionsPerChannel={}) {
   const score = result.friendlinessScore;
   const { friendly, neutral, unfriendly } = result.sentiment;
   const total = friendly + neutral + unfriendly || 1;
@@ -660,7 +660,9 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
     );
   if (result.communityStrengths) embed1.addFields({ name: '✨ Community Strengths', value: result.communityStrengths, inline: false });
   if (result.summary)            embed1.addFields({ name: '🗒️ Vibe Verdict',        value: result.summary, inline: false });
-  if (result.recommendation)    embed1.addFields({ name: '💡 Next Steps',           value: result.recommendation, inline: false });
+  if (result.recommendation)    embed1.addFields({ name: '💡 Next Steps',
+    value: result.recommendation + '\n\n🎮 **Try [Vibe Quest](https://felixagaming.github.io/vibe-quest/)** — a fun game that shows members the real impact of their words on the community vibe.',
+    inline: false });
   embed1.addFields({ name: '🔧 Need Help?', value: `📧 **${CONFIG.CONTACT_EMAIL}**`, inline: false });
   embed1.setFooter({ text: `Vibe Check Bot • ${isPaidServer?'⚡ Pro':'🎁 Free Trial'} • ${remaining} ${remaining===1?'report':'reports'} remaining` });
 
@@ -743,18 +745,39 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
     })
     .setImage(await pieChart(friendly, neutral, unfriendly));
 
-  // ── Section 5: Most Reacted Messages ──
+  // ── Section 5: Most Reacted Messages (per channel) ──
   let embed5 = null;
-  if (reactions && !isPublic && (reactions.mostReacted || reactions.mostPositive || reactions.mostNegative)) {
-    embed5 = new EmbedBuilder()
-      .setColor(0x6366f1)
-      .setTitle('⭐ Top 3 Most Reacted Messages')
-      .setDescription('_The messages that sparked the most engagement. These reveal what your community truly responds to — amplify this energy._');
-    const lines = [];
-    if (reactions.mostReacted)  lines.push(`⭐ **Most reacted:** "${reactions.mostReacted.text}" — ${reactions.mostReacted.reactions}`);
-    if (reactions.mostPositive) lines.push(`👍 **Most positive:** "${reactions.mostPositive.text}" — ${reactions.mostPositive.reactions}`);
-    if (reactions.mostNegative) lines.push(`👎 **Most negative:** "${reactions.mostNegative.text}" — ${reactions.mostNegative.reactions}`);
-    embed5.addFields({ name: 'Engagement Highlights', value: lines.join('\n'), inline: false });
+  if (!isPublic) {
+    const hasReactions = isMultiChannel
+      ? Object.values(reactionsPerChannel).some(r => r?.mostReacted || r?.mostPositive || r?.mostNegative)
+      : (reactions?.mostReacted || reactions?.mostPositive || reactions?.mostNegative);
+
+    if (hasReactions) {
+      embed5 = new EmbedBuilder()
+        .setColor(0x6366f1)
+        .setTitle('⭐ Most Reacted Messages')
+        .setDescription('_The messages that sparked the most engagement per channel. These reveal what your community truly responds to — amplify this energy._');
+
+      if (isMultiChannel) {
+        // Show per-channel breakdown
+        for (const ch of channelNames) {
+          const r = reactionsPerChannel[ch];
+          if (!r) continue;
+          const lines = [];
+          if (r.mostReacted)  lines.push(`⭐ **Most reacted:** "${r.mostReacted.text}" — ${r.mostReacted.reactions}`);
+          if (r.mostPositive) lines.push(`👍 **Most positive:** "${r.mostPositive.text}" — ${r.mostPositive.reactions}`);
+          if (r.mostNegative) lines.push(`👎 **Most negative:** "${r.mostNegative.text}" — ${r.mostNegative.reactions}`);
+          if (lines.length) embed5.addFields({ name: `${ch}`, value: lines.join('\n'), inline: false });
+        }
+      } else {
+        // Single channel
+        const lines = [];
+        if (reactions.mostReacted)  lines.push(`⭐ **Most reacted:** "${reactions.mostReacted.text}" — ${reactions.mostReacted.reactions}`);
+        if (reactions.mostPositive) lines.push(`👍 **Most positive:** "${reactions.mostPositive.text}" — ${reactions.mostPositive.reactions}`);
+        if (reactions.mostNegative) lines.push(`👎 **Most negative:** "${reactions.mostNegative.text}" — ${reactions.mostNegative.reactions}`);
+        embed5.addFields({ name: 'Engagement Highlights', value: lines.join('\n'), inline: false });
+      }
+    }
   }
 
   const embeds = [embed1];
@@ -1468,7 +1491,7 @@ async function handleVibeCommand(interaction) {
       cSent.neutral    += r.result.sentiment.neutral    || 0;
       cSent.unfriendly += r.result.sentiment.unfriendly || 0;
       if (r.result.toxicityTypes) Object.entries(r.result.toxicityTypes).forEach(([k,v]) => { cTox[k] = (cTox[k]||0)+(v||0); });
-      if (r.result.flaggedMessages) cFlagged.push(...r.result.flaggedMessages);
+      if (r.result.flaggedMessages) cFlagged.push(...r.result.flaggedMessages.map(f => ({ ...f, channel: ch })));
     }
     const worst = [...valid].sort((a,b) => a[1].result.friendlinessScore - b[1].result.friendlinessScore)[0];
     if (valid.length > 1) {
@@ -1491,20 +1514,26 @@ async function handleVibeCommand(interaction) {
       summary: cSummary
     };
 
-    const reactions = await getChannelStats(interaction.guild, channels[0]);
+    // Fetch reactions per channel for per-channel display
+    const reactionsPerChannel = {};
+    for (const ch of channels) {
+      reactionsPerChannel[ch.name] = await getChannelStats(interaction.guild, ch);
+    }
+    const reactions = reactionsPerChannel[channels[0].name]; // fallback for single channel
     await incrementUsage(serverId);
     const remaining = await getReportsRemaining(serverId);
 
-    const embeds  = await buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
+    const embeds  = await buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount, reactionsPerChannel);
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
+      new ButtonBuilder().setLabel('🎮 Play Vibe Quest').setStyle(ButtonStyle.Link).setURL('https://felixagaming.github.io/vibe-quest/'),
       new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
     );
     if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
 
     await interaction.editReply({ embeds, components: [buttons] });
 
-    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactions);
+    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactionsPerChannel[channelNames[0]]);
     await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
     await sendEmailReport(serverName, serverId, channelNames, result, totAnalyzed, timeLabel, sensitivity, remaining);
 
@@ -1789,6 +1818,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
         profanity:  'Model the tone you want to see rather than focusing on what you want to stop.'
       };
       recLines.push(`🔮 **Top issue — ${toxEntries[0][0]}:** ${typeRec[toxEntries[0][0]] || 'Amplify positive interactions to naturally crowd out negative ones.'}`);
+    recLines.push(`🎮 **[Play Vibe Quest](https://felixagaming.github.io/vibe-quest/)** — share with your members to show them the real impact of their words on community vibe.`);
     }
 
     const e5 = new EmbedBuilder()
