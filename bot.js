@@ -1209,8 +1209,30 @@ async function handleAdminCommand(interaction) {
 }
 
 // ============================================================
-// HTTP + START
+// HTTP HEALTH CHECK + START (Railway v2.4 Fix)
 // ============================================================
 
-http.createServer((req, res) => res.end('Vibe Check Bot is running')).listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+
+// This binds the server to 0.0.0.0 so Railway passes the health check
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Vibe Check 2.4 Active');
+}).listen(PORT, '0.0.0.0', () => {
+  console.log(`Health check server listening on port ${PORT}`);
+});
+
+// Listener for commands
+client.on('interactionCreate', async interaction => {
+  if (interaction.commandName === 'vibe-progress') await handleProgressCommand(interaction);
+});
+
+// Using clientReady fixes the DeprecationWarning in your logs
+client.once('clientReady', (c) => {
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`Vibe Check Bot 2.4 is online as ${c.user.tag}`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  registerCommands();
+});
+
 client.login(process.env.DISCORD_TOKEN);
