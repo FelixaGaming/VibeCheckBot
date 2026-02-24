@@ -1212,7 +1212,7 @@ async function handleAdminCommand(interaction) {
 // HTTP HEALTH CHECK + START (Railway v2.4 Fix)
 // ============================================================
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // This binds the server to 0.0.0.0 so Railway passes the health check
 http.createServer((req, res) => {
