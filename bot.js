@@ -1551,19 +1551,22 @@ async function handleVibeCommand(interaction) {
     // Notify admin channel on every report
     try {
       const colors = [0x22c55e, 0x3b82f6, 0xf59e0b, 0x8b5cf6, 0xef4444];
+      const s = result.friendlinessScore;
+      const sEmoji = s >= 8 ? '🟢' : s >= 6 ? '🟡' : s >= 4 ? '🟠' : '🔴';
+      const runBy = interaction.user.username || interaction.user.id;
       const notifEmbed = new EmbedBuilder()
         .setColor(colors[(usedNow - 1) % colors.length])
         .setTitle(`📊 Report #${usedNow} — ${serverName}`)
         .addFields(
-          { name: 'Server',    value: serverName,                                         inline: true },
-          { name: 'Score',     value: `**${result.friendlinessScore}/10** ${scoreEmoji(result.friendlinessScore)}`, inline: true },
-          { name: 'Reports',   value: `${usedNow} used`,                                  inline: true },
-          { name: 'Channels',  value: channelNames.join(', '),                            inline: true },
-          { name: 'Messages',  value: `${totAnalyzed}`,                                   inline: true },
-          { name: 'Run by',    value: interaction.user.tag,                               inline: true },
-          { name: 'Server ID', value: `\`${serverId}\``,                                  inline: false }
+          { name: 'Server',    value: String(serverName || 'Unknown'),          inline: true },
+          { name: 'Score',     value: `**${s}/10** ${sEmoji}`,                  inline: true },
+          { name: 'Reports',   value: `${usedNow} used`,                        inline: true },
+          { name: 'Channels',  value: String(channelNames.join(', ') || '—'),   inline: true },
+          { name: 'Messages',  value: String(totAnalyzed || '0'),               inline: true },
+          { name: 'Run by',    value: String(runBy || 'Unknown'),               inline: true },
+          { name: 'Server ID', value: String(serverId),                         inline: false }
         )
-        .setFooter({ text: `${isPaidServer ? '⚡ Pro' : '🎁 Free Trial'} • ${remaining} reports remaining` })
+        .setFooter({ text: `${serverIsPaid ? '⚡ Pro' : '🎁 Free Trial'} • ${remaining} reports remaining` })
         .setTimestamp();
 
       const notifButtons = new ActionRowBuilder().addComponents(
@@ -1573,7 +1576,7 @@ async function handleVibeCommand(interaction) {
         new ButtonBuilder().setCustomId(`admin_endtrial_${serverId}`).setLabel('⛔ End Trial').setStyle(ButtonStyle.Danger)
       );
       await notifyAdminChannel(notifEmbed, notifButtons);
-    } catch (e) { console.error('Report notify error:', e.message); }
+    } catch (e) { console.error('Report notify error:', e.message, e.stack); }
 
     if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
 
@@ -1885,10 +1888,10 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
         .setTitle(`📈 Progress Report Viewed — ${serverName}`)
         .addFields(
           { name: 'Server',   value: serverName,                    inline: true },
-          { name: 'Run by',   value: interaction.user.tag,          inline: true },
+          { name: 'Run by',   value: String(interaction.user.username || interaction.user.id), inline: true },
           { name: 'Reports',  value: `${filtered.length} analyzed`, inline: true },
           { name: 'Range',    value: range === '30d' ? 'Last 30 days' : `Last ${range} reports`, inline: true },
-          { name: 'Server ID', value: `\`${serverId}\``,            inline: false }
+          { name: 'Server ID', value: String(serverId),               inline: false }
         )
         .setTimestamp()
         .setFooter({ text: 'Active user — checking community trends' });
