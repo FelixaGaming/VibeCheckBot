@@ -715,13 +715,20 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
 // SAVE + LOG + EMAILS
 // ============================================================
 
-async function saveReport(serverId, serverName, channelNames, score, sentiment, flaggedCount, sensitivity, timeframe, analyzedCount, toxicityTypes) {
+async function saveReport(serverId, serverName, channelNames, score, sentiment, flaggedCount, sensitivity, timeframe, analyzedCount, toxicityTypes, reactions) {
   try {
+    // Build most_reacted_message string from reactions data
+    const topReacted = reactions?.mostReacted
+      ? `${reactions.mostReacted.text} [${reactions.mostReacted.reactions}]`
+      : null;
+
     await supabase.from('reports').insert({
       server_id: serverId, server_name: serverName, channel_name: channelNames.join(', '),
       score, friendly: sentiment.friendly, neutral: sentiment.neutral, unfriendly: sentiment.unfriendly,
       flagged_count: flaggedCount, sensitivity, timeframe, messages_analyzed: analyzedCount,
-      toxicity_types: JSON.stringify(toxicityTypes||{}), created_at: new Date().toISOString()
+      toxicity_types: JSON.stringify(toxicityTypes||{}),
+      most_reacted_message: topReacted,
+      created_at: new Date().toISOString()
     });
   } catch (e) { console.error('Save report error:', e.message); }
 }
@@ -1443,7 +1450,7 @@ async function handleVibeCommand(interaction) {
 
     await interaction.editReply({ embeds, components: [buttons] });
 
-    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes);
+    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactions);
     await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
     await sendEmailReport(serverName, serverId, channelNames, result, totAnalyzed, timeLabel, sensitivity, remaining);
 
@@ -1584,11 +1591,14 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const flagSummary = `First report: **${fFlag}** flagged | Latest: **${lFlag}** flagged\n` +
       (lFlag < fFlag ? `✅ Down ${fFlag-lFlag} — great progress` : lFlag > fFlag ? `⚠️ Up ${lFlag-fFlag} — opportunity to reinforce positive norms` : '➡️ Stable');
 
-    const topReacted = filtered
-      .filter(r => r.most_reacted_message)
-      .slice(-3)
-      .map((r,i) => `${i+1}. "${r.most_reacted_message.substring(0,80)}"`)
-      .join('\n') || '_Not tracked in current data — future reports will include this._';
+    // Top 3 most reacted — sorted by date, pick 3 most recent that have data
+    const reportsWithReactions = filtered.filter(r => r.most_reacted_message);
+    const topReacted = reportsWithReactions.length > 0
+      ? reportsWithReactions.slice(-3).map((r,i) => {
+          const date = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          return `${i+1}. **[${date}]** "${r.most_reacted_message.substring(0,80)}${r.most_reacted_message.length>80?'...':''}"`;
+        }).join('\n')
+      : '_Reaction data will appear here after your next `/vibe` run — this feature tracks the most engaged message from each report going forward._';
 
     const e2_tox = new EmbedBuilder()
       .setColor(0xf97316)
