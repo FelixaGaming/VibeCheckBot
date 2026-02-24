@@ -7,7 +7,7 @@ const http = require('http');
 const PORT = process.env.PORT || 8080;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Vibe Check 2.4 Active');
+  res.end('Vibe Check 2.5 Active');
 }).listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Railway Health Check online on port ${PORT}`);
 });
@@ -250,16 +250,27 @@ async function getChannelStats(guild, channel) {
 // QUICKCHART HELPERS
 // ============================================================
 
-function chartUrl(cfg, w, h) {
-  return `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(cfg))}&w=${w||500}&h=${h||260}&bkg=white`;
+async function chartUrl(cfg, w, h) {
+  try {
+    const res = await fetch('https://quickchart.io/chart/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chart: cfg, width: w||500, height: h||260, backgroundColor: 'white' })
+    });
+    const data = await res.json();
+    return data.url || null;
+  } catch (e) {
+    console.error('Chart URL error:', e.message);
+    return null;
+  }
 }
 
-function pieChart(friendly, neutral, unfriendly) {
+async function pieChart(friendly, neutral, unfriendly) {
   const total = friendly + neutral + unfriendly || 1;
   const fp = Math.round(friendly / total * 100);
   const np = Math.round(neutral  / total * 100);
   const up = Math.round(unfriendly / total * 100);
-  return chartUrl({
+  return await chartUrl({
     type: 'pie',
     data: {
       labels: [`Friendly ${fp}%`, `Neutral ${np}%`, `Unfriendly ${up}%`],
@@ -269,10 +280,10 @@ function pieChart(friendly, neutral, unfriendly) {
   });
 }
 
-function toxBarChart(toxTypes, title) {
+async function toxBarChart(toxTypes, title) {
   const entries = Object.entries(toxTypes || {}).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]).slice(0,7);
   if (!entries.length) return null;
-  return chartUrl({
+  return await chartUrl({
     type: 'horizontalBar',
     data: {
       labels: entries.map(([k]) => k),
@@ -282,9 +293,9 @@ function toxBarChart(toxTypes, title) {
   });
 }
 
-function scoreLineChart(reports) {
+async function scoreLineChart(reports) {
   const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-  return chartUrl({
+  return await chartUrl({
     type: 'line',
     data: {
       labels,
@@ -302,9 +313,9 @@ function scoreLineChart(reports) {
   });
 }
 
-function impactLineChart(reports) {
+async function impactLineChart(reports) {
   const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-  return chartUrl({
+  return await chartUrl({
     type: 'line',
     data: {
       labels,
@@ -323,10 +334,10 @@ function impactLineChart(reports) {
   });
 }
 
-function sentimentStackedChart(reports) {
+async function sentimentStackedChart(reports) {
   const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   const sd = (n, d) => d === 0 ? 0 : Math.round(n / d * 100);
-  return chartUrl({
+  return await chartUrl({
     type: 'bar',
     data: {
       labels,
@@ -343,9 +354,9 @@ function sentimentStackedChart(reports) {
   });
 }
 
-function flaggedLineChart(reports) {
+async function flaggedLineChart(reports) {
   const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-  return chartUrl({
+  return await chartUrl({
     type: 'line',
     data: {
       labels,
@@ -363,7 +374,7 @@ function flaggedLineChart(reports) {
   });
 }
 
-function cumulativeToxChart(reports) {
+async function cumulativeToxChart(reports) {
   const toxMap = {};
   reports.forEach(r => {
     try {
@@ -371,10 +382,10 @@ function cumulativeToxChart(reports) {
       if (t) Object.entries(t).forEach(([k,v]) => { toxMap[k] = (toxMap[k]||0) + (v||0); });
     } catch {}
   });
-  return toxBarChart(toxMap, 'Cumulative Toxicity Breakdown');
+  return await toxBarChart(toxMap, 'Cumulative Toxicity Breakdown');
 }
 
-function multiChannelLineChart(reports, allChs) {
+async function multiChannelLineChart(reports, allChs) {
   const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   const colors = ['#f97316','#8b5cf6','#22c55e','#3b82f6','#ef4444','#ec4899','#14b8a6'];
   const datasets = allChs.map((ch, i) => {
@@ -395,7 +406,7 @@ function multiChannelLineChart(reports, allChs) {
       spanGaps: true
     };
   });
-  return chartUrl({
+  return await chartUrl({
     type: 'line',
     data: { labels, datasets },
     options: {
@@ -553,7 +564,7 @@ function scoreLabel(s) { return s >= 8 ? 'Excellent' : s >= 6 ? 'Good' : s >= 4 
 // BUILD /vibe EMBEDS
 // ============================================================
 
-function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions, isPublic, channelMsgCounts, channelResults, memberCount) {
+async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, sensitivity, remaining, isPaidServer, reactions, isPublic, channelMsgCounts, channelResults, memberCount) {
   const score = result.friendlinessScore;
   const { friendly, neutral, unfriendly } = result.sentiment;
   const total = friendly + neutral + unfriendly || 1;
@@ -607,7 +618,7 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
     }
   }
   if (!isPublic && result.toxicityTypes) {
-    const tUrl = toxBarChart(result.toxicityTypes, 'Toxicity Types');
+    const tUrl = await toxBarChart(result.toxicityTypes, 'Toxicity Types');
     if (tUrl) embed2.setImage(tUrl);
   }
 
@@ -637,7 +648,7 @@ function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLabel, se
         `🔴 Unfriendly \`${String(unfriendly).padStart(4)}\`  **${up}%**`,
       inline: false
     })
-    .setImage(pieChart(friendly, neutral, unfriendly));
+    .setImage(await pieChart(friendly, neutral, unfriendly));
 
   let embed5 = null;
   if (reactions && !isPublic && (reactions.mostReacted || reactions.mostPositive || reactions.mostNegative)) {
@@ -1156,7 +1167,7 @@ async function registerCommands() {
 
 client.once('clientReady', c => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`🚀 Vibe Check Bot 2.4 is online: ${c.user.tag}`);
+  console.log(`🚀 Vibe Check Bot 2.5 is online: ${c.user.tag}`);
   console.log(`   Servers: ${c.guilds.cache.size}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   registerCommands();
@@ -1376,7 +1387,7 @@ async function handleVibeCommand(interaction) {
     await incrementUsage(serverId);
     const remaining = await getReportsRemaining(serverId);
 
-    const embeds  = buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
+    const embeds  = await buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount);
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
       new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
@@ -1547,7 +1558,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     // ── SECTION 2 chart embeds — each with title + explanation ──
 
     // Chart 1: Multi-channel trajectory
-    const multiChUrl = multiChannelLineChart(filtered, allChs);
+    const multiChUrl = await multiChannelLineChart(filtered, allChs);
     const eChart1 = new EmbedBuilder()
       .setColor(0xf97316)
       .setTitle('📊 Chart: Vibe Level Trajectory — All Channels')
@@ -1559,10 +1570,10 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       .setColor(0xf97316)
       .setTitle('📊 Chart: Global Vibe Strength Over Time')
       .setDescription('_The weighted average friendliness score across your entire community. Higher is healthier. Use this to track whether your overall community health is trending up or down._')
-      .setImage(scoreLineChart(filtered));
+      .setImage(await scoreLineChart(filtered));
 
     // Chart 3: Cumulative toxicity
-    const toxChartUrl = cumulativeToxChart(filtered);
+    const toxChartUrl = await cumulativeToxChart(filtered);
     const eChart3 = toxChartUrl
       ? new EmbedBuilder()
           .setColor(0xf97316)
@@ -1576,14 +1587,14 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       .setColor(0xf97316)
       .setTitle('📊 Chart: Sentiment Evolution')
       .setDescription('_Stacked bars showing the percentage of Friendly (green), Neutral (grey), and Unfriendly (red) messages per report. Watch the green grow and the red shrink over time as your community improves._')
-      .setImage(sentimentStackedChart(filtered));
+      .setImage(await sentimentStackedChart(filtered));
 
     // Chart 5: Flagged messages trend
     const eChart5 = new EmbedBuilder()
       .setColor(0xf97316)
       .setTitle('📊 Chart: Flagged Messages Over Time')
       .setDescription('_Number of harmful messages flagged per report. A downward trend means your community standards are strengthening. Spikes are early warning signals to act on._')
-      .setImage(flaggedLineChart(filtered));
+      .setImage(await flaggedLineChart(filtered));
 
     // ── SECTION 3: Per-Channel ──
     const perChLines = allChs.map(ch => {
@@ -1601,7 +1612,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       .setTitle('🧪 Section 3 — Trend Analysis Per Channel')
       .setDescription('_A detailed breakdown of each individual channel\'s health. Channels shown in 🟢 green are flourishing. 🟡 Yellow channels need encouragement. 🔴 Red channels need focused community-building attention._')
       .addFields({ name: 'Per-Channel Breakdown', value: perChLines.length ? perChLines.join('\n\n') : 'Only one channel tracked so far.', inline: false })
-      .setImage(impactLineChart(filtered));
+      .setImage(await impactLineChart(filtered));
 
     // ── SECTION 4: Predictive Analytics ──
     const predLines = [];
