@@ -510,13 +510,19 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
     ? channelNames[0]
     : channelNames.join(', ');
 
+  const communityDesc = score >= 8 ? 'Your community is thriving and welcoming.'
+    : score >= 6 ? 'Your community is generally positive.'
+    : score >= 4 ? 'Your community has a mixed atmosphere.'
+    : 'Your community needs attention.';
+
   const embed = new EmbedBuilder()
     .setColor(scoreColor(score))
-    .setTitle(`📊 Community Vibe Report`)
+    .setTitle(channelNames.length > 1 ? `📊 Multi-Channel Vibe Report` : `📊 Community Vibe Report`)
     .setDescription(
-      `**${channelDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages\n\n` +
+      `**${channelDisplay}** • Last ${timeframeLabel} • ${analyzedCount} messages • Sensitivity: **${sensitivity.charAt(0).toUpperCase() + sensitivity.slice(1)}**\n\n` +
       `**${scoreEmoji(score)} Friendliness Score: ${score}/10**\n` +
-      `\`${bar}\``
+      `\`${bar}\`\n` +
+      `*${communityDesc}*`
     );
 
   // ── Section 1: Descriptive ──
@@ -575,7 +581,20 @@ function buildReportEmbed(result, analyzedCount, channelNames, timeframeLabel, s
       embed.addFields({ name: '✅ No Flagged Content', value: 'No harmful content detected.', inline: false });
     }
   } else {
-    // Private report — show full flagged messages
+    // Private report — toxicity breakdown bars + full flagged messages
+    if (result.toxicityTypes && Object.keys(result.toxicityTypes).length > 0) {
+      const types = Object.entries(result.toxicityTypes)
+        .filter(([, v]) => v > 0)
+        .sort((a, b) => b[1] - a[1]);
+      const maxVal = types[0]?.[1] || 1;
+      const toxBars = types.map(([k, v]) => {
+        const filled = Math.round((v / maxVal) * 8);
+        const bar = '█'.repeat(filled) + '░'.repeat(8 - filled);
+        return `\`${bar}\` ${k}: ${v}`;
+      }).join('\n');
+      embed.addFields({ name: '🧪 Toxicity Breakdown', value: toxBars.substring(0, 1024), inline: false });
+    }
+
     if (result.flaggedMessages && result.flaggedMessages.length > 0) {
       const flaggedList = result.flaggedMessages
         .sort((a, b) => b.severity - a.severity)
