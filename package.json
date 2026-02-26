@@ -1,13 +1,15 @@
 {
-  "name": "vibecheck-bot",
-  "version": "2.0.0",
+  "name": "vibe-check-bot",
+  "version": "2.6",
   "main": "bot.js",
-  "scripts": { "start": "node bot.js" },
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
-    "discord.js": "^14.14.1",
+    "discord.js": "^14.16.3",
     "openai": "^4.0.0",
     "resend": "^2.0.0",
     "@supabase/supabase-js": "^2.0.0",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.0.0"
   }
 }
