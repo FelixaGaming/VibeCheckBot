@@ -18,7 +18,7 @@ Environment validated
 ✅ Railway Health Check online on port 8080
 Starting Container
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚀 Vibe Check Bot 2.5 is online: VibeCheck Bot#8099
+🚀 Vibe Check Bot 2.6 is online: VibeCheck Bot#8099
    Servers: 3
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ Commands registered
@@ -27,4 +27,4 @@ Starting Container
 Environment validated
 ✅ Railway Health Check online on port 8080
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🚀 Vibe Check Bot 2.5 is online: VibeCheck Bot#8099
+🚀 Vibe Check Bot 2.6 is online: VibeCheck Bot#8099
