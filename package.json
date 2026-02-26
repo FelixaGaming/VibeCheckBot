@@ -1,6 +1,6 @@
 {
   "name": "vibe-check-bot",
-  "version": "2.6",
+  "version": "2.6.1",
   "main": "bot.js",
   "engines": {
     "node": "20.x"
