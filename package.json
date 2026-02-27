@@ -1,15 +1,15 @@
 {
   "name": "vibe-check-bot",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
   "engines": {
     "node": "20.x"
   },
-  "overrides": {
-    "@sapphire/shapeshift": "3.9.7"
-  },
   "dependencies": {
-    "discord.js": "14.16.3",
+    "discord.js": "14.11.0",
     "openai": "4.28.0",
     "resend": "2.1.0",
     "@supabase/supabase-js": "2.39.0",
