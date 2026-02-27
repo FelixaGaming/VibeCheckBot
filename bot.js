@@ -59,16 +59,20 @@ const CONFIG = {
 
 const SENSITIVITY_PROMPTS = {
   low: `SENSITIVITY: LOW (Adult/Gaming communities)
-- Casual trash talk and banter is NORMAL — mark as neutral, NOT unfriendly
-- Only flag: death threats, slurs, doxxing, severe harassment
-- Profanity alone is NOT unfriendly`,
+- Casual trash talk, banter and venting is NORMAL — mark as neutral, NOT unfriendly
+- Only flag: explicit death threats, identity-based slurs used to attack someone, doxxing, severe targeted harassment
+- Profanity alone describing a situation or frustration is NEVER unfriendly
+- Sarcasm, dark humor, and hyperbole are neutral unless clearly targeting a real person with intent to harm`,
   medium: `SENSITIVITY: MEDIUM (General communities)
-- Flag: insults, harassment, bullying, hate speech, threats, repeated negativity
-- Mild disagreement = neutral. Personal attacks = unfriendly
-- Flag xenophobia, racism, sexism, homophobia`,
+- Only flag messages that DIRECTLY TARGET a real person or group with intent to demean, harm or exclude
+- Venting about situations, news, events or places = neutral (even if using strong language)
+- Mild disagreement, gossip, joking = neutral
+- Personal attacks, identity-based slurs directed at someone, coordinated harassment = unfriendly
+- Xenophobia, racism, sexism, homophobia only when used to attack real people — not when discussing those topics`,
   high: `SENSITIVITY: HIGH (Kids / Family / Education)
-- Flag: any profanity, mild insults, rude dismissals, negative tone
-- Very strict — when in doubt, mark as unfriendly`
+- Flag profanity, mild insults, rude dismissals, negative tone directed at others
+- Strict — personal attacks, exclusionary language, mockery = unfriendly
+- Venting about situations (not people) = neutral`
 };
 
 // ============================================================
@@ -425,7 +429,8 @@ async function cumulativeToxChart(reports) {
   const toxMap = {};
   reports.forEach(r => {
     try {
-      const t = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+      const raw = typeof r.toxicity_types === 'string' ? JSON.parse(r.toxicity_types) : r.toxicity_types;
+      const t = normalizeToxicityTypes(raw);
       if (t) Object.entries(t).forEach(([k,v]) => { toxMap[k] = (toxMap[k]||0) + (v||0); });
     } catch {}
   });
@@ -525,7 +530,7 @@ function calcBehaviorProbability(reports) {
   else if (flagLatest > flagFirst * 1.3)         { improveScore -= 10; factors.push(`Flagged messages spiking (${flagFirst} to ${flagLatest})`); }
 
   const latestTox = (() => {
-    try { return typeof reports[reports.length-1].toxicity_types === 'string' ? JSON.parse(reports[reports.length-1].toxicity_types) : (reports[reports.length-1].toxicity_types || {}); }
+    try { return normalizeToxicityTypes(typeof reports[reports.length-1].toxicity_types === 'string' ? JSON.parse(reports[reports.length-1].toxicity_types) : (reports[reports.length-1].toxicity_types || {})); }
     catch { return {}; }
   })();
   const severeTypes = ['harassment', 'threats', 'hate_speech', 'bullying'];
@@ -546,6 +551,44 @@ function calcBehaviorProbability(reports) {
 // AI ANALYSIS
 // ============================================================
 
+// Canonical toxicity keys — single source of truth
+const TOXICITY_KEYS = ['insults', 'harassment', 'threats', 'hate_speech', 'bullying', 'profanity', 'spam'];
+
+// Normalize a toxicity type string returned by GPT to one of the 7 canonical keys
+function normalizeToxicityKey(raw) {
+  if (!raw || typeof raw !== 'string') return 'insults';
+  const s = raw.toLowerCase().trim().replace(/^_+|_+$/g, '').replace(/-/g, '_');
+  // Direct match
+  if (TOXICITY_KEYS.includes(s)) return s;
+  // Singular/plural variants
+  const map = {
+    insult: 'insults', insulting: 'insults',
+    harass: 'harassment', harassing: 'harassment',
+    threat: 'threats', threatening: 'threats',
+    hate: 'hate_speech', hatespeech: 'hate_speech', hate_speech: 'hate_speech',
+    bully: 'bullying',
+    profan: 'profanity', swear: 'profanity', cursing: 'profanity',
+    spam: 'spam', spamming: 'spam',
+    other: 'insults', offensive: 'insults', toxic: 'insults'
+  };
+  for (const [k, v] of Object.entries(map)) {
+    if (s.startsWith(k)) return v;
+  }
+  return 'insults'; // fallback
+}
+
+// Normalize a full toxicityTypes object — always returns all 7 keys as integers
+function normalizeToxicityTypes(raw) {
+  const result = {};
+  TOXICITY_KEYS.forEach(k => result[k] = 0);
+  if (!raw || typeof raw !== 'object') return result;
+  for (const [k, v] of Object.entries(raw)) {
+    const canonical = normalizeToxicityKey(k);
+    result[canonical] = (result[canonical] || 0) + (parseInt(v) || 0);
+  }
+  return result;
+}
+
 async function analyzeMessages(messages, channelNames, sensitivity, timeframeLabel) {
   let msgs = messages;
   if (msgs.join(' ').length > CONFIG.MAX_OPENAI_CHARS) {
@@ -560,10 +603,32 @@ ${sensitivityPrompt}
 
 Analyze these ${count} messages from ${channelNames.join(', ')} (last ${timeframeLabel}).
 
-ANALYSIS RULES:
+CLASSIFICATION RULES — READ CAREFULLY:
+- A message is only UNFRIENDLY if it DIRECTLY TARGETS a real person or group with clear intent to harm, demean, threaten or exclude
+- Messages describing external events, news, places, or situations are ALWAYS NEUTRAL — even if they contain strong language or describe violence
+- Jokes, banter, sarcasm, hyperbole, and venting about situations are NEUTRAL
+- Profanity used to express frustration about a situation (not directed AT a person) is NEUTRAL
+- Discord emotes, reaction memes, and gaming terms are NEUTRAL
+- NEVER flag a message solely because it contains a swear word, slang, or describes something chaotic or violent happening in the world
+
+LANGUAGE & CULTURAL CONTEXT — CRITICAL:
+- Messages may be in ANY language — analyze meaning in cultural context, not literally
+- Mexican/Latin American slang (culero, wey, chido, cabron, pedo, chisme, etc.) must be understood culturally before flagging
+- Colloquial expressions that sound harsh in literal translation are often neutral in context
+- When uncertain about a non-English phrase, default to NEUTRAL
+
+TOXICITY TYPE DEFINITIONS — use ONLY these exact 7 keys, nothing else:
+- "insults": direct personal attacks calling someone stupid, ugly, worthless, etc.
+- "harassment": repeated targeting or unwanted pressure toward a specific person
+- "threats": explicit statements of intent to harm someone physically or digitally
+- "hate_speech": slurs or dehumanizing language targeting race, gender, sexuality, religion, nationality
+- "bullying": sustained mockery or humiliation of someone to make them feel powerless
+- "profanity": severe profanity explicitly directed AT a person (NOT profanity about situations)
+- "spam": repeated identical or near-identical messages with no value
+
+SENTIMENT RULES:
 - sentiment counts (friendly + neutral + unfriendly) MUST add up to exactly ${count}
 - Flag ALL unfriendly messages — do not limit
-- Understand messages in ANY language
 
 RECOMMENDATION RULES — CRITICAL:
 - Write recommendations using POSITIVE PSYCHOLOGY principles only
@@ -577,12 +642,12 @@ RECOMMENDATION RULES — CRITICAL:
 MESSAGES:
 ${msgs.map((m,i) => `${i+1}. ${m}`).join('\n')}
 
-Respond ONLY with this exact JSON (no markdown):
+Respond ONLY with this exact JSON (no markdown, no extra keys):
 {
   "friendlinessScore": <0-10 number>,
   "sentiment": { "friendly": <int>, "neutral": <int>, "unfriendly": <int> },
-  "flaggedMessages": [{ "message": "<text>", "type": "<insult|harassment|threat|hate_speech|bullying|profanity|spam|other>", "severity": <1-10> }],
-  "toxicityTypes": { "insults": <n>, "harassment": <n>, "threats": <n>, "hate_speech": <n>, "bullying": <n>, "profanity": <n>, "spam": <n> },
+  "flaggedMessages": [{ "message": "<exact message text>", "type": "<insults|harassment|threats|hate_speech|bullying|profanity|spam>", "severity": <1-10> }],
+  "toxicityTypes": { "insults": <int>, "harassment": <int>, "threats": <int>, "hate_speech": <int>, "bullying": <int>, "profanity": <int>, "spam": <int> },
   "communityStrengths": "<1-2 sentences about what the community is doing well>",
   "recommendation": "<2-3 specific positive-psychology-based suggestions to grow community health>",
   "summary": "<1 sentence overall verdict>"
@@ -604,6 +669,17 @@ Respond ONLY with this exact JSON (no markdown):
   const cost  = (usage.prompt_tokens/1e6)*CONFIG.COST_PER_1M_INPUT_TOKENS + (usage.completion_tokens/1e6)*CONFIG.COST_PER_1M_OUTPUT_TOKENS;
   let result  = JSON.parse(resp.choices[0].message.content.trim());
   result.friendlinessScore = Math.min(Math.max(Number(result.friendlinessScore)||0, 0), 10);
+
+  // Normalize toxicity types to canonical keys — eliminates duplicates like insult/insults/_insults
+  result.toxicityTypes = normalizeToxicityTypes(result.toxicityTypes);
+
+  // Normalize flaggedMessages type field to match canonical keys
+  if (Array.isArray(result.flaggedMessages)) {
+    result.flaggedMessages = result.flaggedMessages.map(fm => ({
+      ...fm,
+      type: normalizeToxicityKey(fm.type)
+    }));
+  }
 
   const st = result.sentiment.friendly + result.sentiment.neutral + result.sentiment.unfriendly;
   if (st !== count) {
@@ -1656,7 +1732,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     // Cumulative toxicity
     const toxMap = {};
     filtered.forEach(r => {
-      try { const t=typeof r.toxicity_types==='string'?JSON.parse(r.toxicity_types):r.toxicity_types; if(t)Object.entries(t).forEach(([k,v])=>{toxMap[k]=(toxMap[k]||0)+(v||0);}); } catch {}
+      try { const t=normalizeToxicityTypes(typeof r.toxicity_types==='string'?JSON.parse(r.toxicity_types):r.toxicity_types); if(t)Object.entries(t).forEach(([k,v])=>{toxMap[k]=(toxMap[k]||0)+(v||0);}); } catch {}
     });
     const toxEntries = Object.entries(toxMap).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]);
 
