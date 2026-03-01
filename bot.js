@@ -1654,6 +1654,8 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
 
+    const normCh = n => n && !n.startsWith('#') ? `#${n}` : n;
+
     const sorted = [...reports].reverse(); // oldest → newest
 
     // Split into global rows (one combined per run, for aggregate stats) and individual channel rows (for per-channel charts)
@@ -1667,7 +1669,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       .map(group => group.find(r => r.channel_name?.includes(',')) || group[0])
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .slice(-(range === '30d' ? Infinity : rangeInt)); // trim to requested run count
-    const channelSorted = sorted.filter(r => !r.channel_name?.includes(','));
+    const channelSorted = sorted.filter(r => !r.channel_name?.includes(',')).map(r => ({ ...r, channel_name: normCh(r.channel_name) }));
 
     let filtered = sorted, globalFiltered = globalSorted, channelFiltered = channelSorted, filterLabel = '';
     if (filterChannels?.length === 1) {
@@ -1694,8 +1696,8 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
 
     // All unique individual channels — from per-channel rows, falling back to splitting combined names for old data
     const rawChs = channelFiltered.length
-      ? channelFiltered.map(r => r.channel_name)
-      : globalSorted.flatMap(r => r.channel_name?.split(', ') || []);
+      ? channelFiltered.map(r => normCh(r.channel_name))
+      : globalSorted.flatMap(r => r.channel_name?.split(', ').map(normCh) || []);
     const allChs = [...new Set(rawChs.filter(Boolean))];
 
     // Cumulative toxicity
