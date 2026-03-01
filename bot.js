@@ -800,7 +800,7 @@ async function saveReport(serverId, serverName, channelNames, score, sentiment, 
       : null;
 
     const ts = new Date().toISOString();
-    await supabase.from('reports').insert({
+    const { error: insertError } = await supabase.from('reports').insert({
       server_id: serverId, server_name: serverName, channel_name: channelNames.join(', '),
       score, friendly: sentiment.friendly, neutral: sentiment.neutral, unfriendly: sentiment.unfriendly,
       flagged_count: flaggedCount, sensitivity, timeframe, messages_analyzed: analyzedCount,
@@ -808,7 +808,8 @@ async function saveReport(serverId, serverName, channelNames, score, sentiment, 
       most_reacted_message: topReacted,
       created_at: ts
     });
-    console.log(`[SAVE DEBUG] Combined row saved: ${channelNames.join(', ')} at ${ts}`);
+    if (insertError) console.error(`[SAVE ERROR] Combined row failed: ${insertError.message}`);
+    else console.log(`[SAVE DEBUG] Combined row saved: ${channelNames.join(', ')} at ${ts}`);
 
     // Also save individual channel rows for multi-channel runs (enables per-channel progress tracking)
     if (channelResults && channelNames.length > 1) {
@@ -830,7 +831,11 @@ async function saveReport(serverId, serverName, channelNames, score, sentiment, 
           created_at: ts
         };
       }).filter(Boolean);
-      if (individualRows.length) await supabase.from('reports').insert(individualRows);
+      if (individualRows.length) {
+        const { error: indError } = await supabase.from('reports').insert(individualRows);
+        if (indError) console.error(`[SAVE ERROR] Individual rows failed: ${indError.message}`);
+        else console.log(`[SAVE DEBUG] Individual rows saved: ${channelNames.join(', ')} at ${ts}`);
+      }
     }
   } catch (e) { console.error('Save report error:', e.message); }
 }
