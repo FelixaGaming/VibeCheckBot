@@ -1647,8 +1647,9 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
 
   try {
     let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', { ascending: false });
+    const rangeInt = parseInt(range)||10;
     if (range === '30d') q = q.gte('created_at', new Date(Date.now()-30*86400000).toISOString());
-    else q = q.limit(parseInt(range)||10);
+    else q = q.limit(rangeInt * 6); // multiply by 6 (max 5 channels + 1 combined row per run)
 
     const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
@@ -1664,7 +1665,8 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     });
     const globalSorted = Object.values(runGroups)
       .map(group => group.find(r => r.channel_name?.includes(',')) || group[0])
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      .slice(-(range === '30d' ? Infinity : rangeInt)); // trim to requested run count
     const channelSorted = sorted.filter(r => !r.channel_name?.includes(','));
 
     let filtered = sorted, globalFiltered = globalSorted, channelFiltered = channelSorted, filterLabel = '';
