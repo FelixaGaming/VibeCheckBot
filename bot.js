@@ -44,6 +44,7 @@ const CONFIG = {
   STRIPE_YEARLY_LINK:  'https://buy.stripe.com/bJebIUbJ56wd4Wye0v4ow03',
   CONTACT_EMAIL: 'play@felixagaming.com',
   REPORT_EMAIL:  'go@vibecheckbot.com',
+  OWNER_EMAIL:   'play@felixagaming.com',
   OWNER_ID:      '1185219817913991220',
   YEARLY_ENABLED: true,
   COOLDOWN_SECONDS: 15,
@@ -1112,21 +1113,25 @@ async function notifyNewInstall(guild) {
 
   // Email alert
   try {
-    await adminEmail(
-      `🎉 New Install — ${name} (${members} members)`,
-      'linear-gradient(135deg,#22c55e,#16a34a)',
-      '🎉 New Server Installed Vibe Check Bot!',
-      `<table style="width:100%;border-collapse:collapse">
+    const body = `<table style="width:100%;border-collapse:collapse">
         ${infoRow('Server Name', name)}
         ${infoRow('Server ID', sid)}
         ${infoRow('Member Count', members)}
         ${infoRow('Free Reports', CONFIG.FREE_REPORTS)}
         ${infoRow('Status', '🟢 Free Trial Started')}
       </table>
-      <div style="margin-top:20px;padding:16px;background:#f0fdf4;border-radius:10px;font-size:14px;color:#15803d">
-        Use <strong>/vibe-admin action:tester server_id:${sid}</strong> to give unlimited tester access, or <strong>action:pro</strong> to activate Pro.
-      </div>`
-    );
+      <div style="margin-top:24px">
+        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#22c55e;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">🧪 Give Tester Access</a>
+        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#3b82f6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">⚡ Activate Pro</a>
+      </div>
+      <div style="margin-top:16px;padding:16px;background:#f0fdf4;border-radius:10px;font-size:13px;color:#15803d;font-family:monospace">
+        /vibe-admin action:tester server_id:${sid}<br>
+        /vibe-admin action:pro server_id:${sid}
+      </div>`;
+    await adminEmail(`🎉 New Install — ${name} (${members} members)`, 'linear-gradient(135deg,#22c55e,#16a34a)', '🎉 New Server Installed Vibe Check Bot!', body);
+    if (CONFIG.OWNER_EMAIL !== CONFIG.REPORT_EMAIL) {
+      await resend.emails.send({ from: 'Vibe Check Bot <reports@vibecheckbot.com>', to: CONFIG.OWNER_EMAIL, subject: `🎉 New Install — ${name} (${members} members)`, html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif"><div style="max-width:580px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)"><div style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:28px 36px"><h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">🎉 New Server Installed Vibe Check Bot!</h1><div style="margin-top:6px;color:rgba(255,255,255,0.85);font-size:13px">${new Date().toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div></div><div style="padding:28px 36px">${body}</div></div></body></html>` });
+    }
   } catch (e) { console.error('New install email error:', e.message); }
 }
 
@@ -1221,22 +1226,27 @@ async function sendTrialEndedEmail(serverName, serverId, userName) {
   await notifyAdminChannel(embed, buttons);
 
   try {
-    await adminEmail(
-      `⚠️ Trial Exhausted — ${serverName} needs extension`,
-      'linear-gradient(135deg,#f59e0b,#d97706)',
-      '⚠️ Server Hit Their Free Trial Limit!',
-      `<table style="width:100%;border-collapse:collapse">
+    const body = `<table style="width:100%;border-collapse:collapse">
         ${infoRow('Server Name', serverName)}
         ${infoRow('Server ID', serverId)}
         ${infoRow('Triggered By', userName)}
         ${infoRow('Reports Used', '5 / 5 — Trial Exhausted')}
         ${infoRow('Action Needed', 'Extend trial or wait for them to upgrade')}
       </table>
-      <div style="margin-top:20px;padding:16px;background:#fffbeb;border-radius:10px;font-size:14px;color:#92400e">
-        To extend: <strong>/vibe-admin action:test server_id:${serverId} reports:5</strong><br>
-        To activate Pro: <strong>/vibe-admin action:pro server_id:${serverId}</strong>
-      </div>`
-    );
+      <div style="margin-top:24px">
+        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#22c55e;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">➕ Extend Trial (+5)</a>
+        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#3b82f6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">⚡ Activate Pro</a>
+        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#8b5cf6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">🧪 Give Tester Access</a>
+      </div>
+      <div style="margin-top:16px;padding:16px;background:#fffbeb;border-radius:10px;font-size:13px;color:#92400e;font-family:monospace">
+        /vibe-admin action:test server_id:${serverId} reports:5<br>
+        /vibe-admin action:pro server_id:${serverId}<br>
+        /vibe-admin action:tester server_id:${serverId}
+      </div>`;
+    await adminEmail(`⚠️ Trial Exhausted — ${serverName} needs extension`, 'linear-gradient(135deg,#f59e0b,#d97706)', '⚠️ Server Hit Their Free Trial Limit!', body);
+    if (CONFIG.OWNER_EMAIL !== CONFIG.REPORT_EMAIL) {
+      await resend.emails.send({ from: 'Vibe Check Bot <reports@vibecheckbot.com>', to: CONFIG.OWNER_EMAIL, subject: `⚠️ Trial Exhausted — ${serverName} needs extension`, html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif"><div style="max-width:580px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)"><div style="background:linear-gradient(135deg,#f59e0b,#d97706);padding:28px 36px"><h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">⚠️ Server Hit Their Free Trial Limit!</h1><div style="margin-top:6px;color:rgba(255,255,255,0.85);font-size:13px">${new Date().toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div></div><div style="padding:28px 36px">${body}</div></div></body></html>` });
+    }
   } catch (e) { console.error('Trial ended email error:', e.message); }
 }
 
