@@ -1802,17 +1802,10 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const flagSummary = `First report: **${fFlag}** flagged | Latest: **${lFlag}** flagged\n` +
       (lFlag < fFlag ? `✅ Down ${fFlag-lFlag} — great progress` : lFlag > fFlag ? `⚠️ Up ${lFlag-fFlag} — opportunity to reinforce positive norms` : '➡️ Stable');
 
-    // Top 3 most reacted — deduplicated by message text, most recent first
+    // Top 3 most reacted — sorted by date, pick 3 most recent that have data
     const reportsWithReactions = filtered.filter(r => r.most_reacted_message);
-    const seenMessages = new Set();
-    const uniqueReacted = reportsWithReactions.filter(r => {
-      const key = r.most_reacted_message.substring(0, 80);
-      if (seenMessages.has(key)) return false;
-      seenMessages.add(key);
-      return true;
-    });
-    const topReacted = uniqueReacted.length > 0
-      ? uniqueReacted.slice(-3).map((r,i) => {
+    const topReacted = reportsWithReactions.length > 0
+      ? reportsWithReactions.slice(-3).map((r,i) => {
           const date = utcDateLabel(r.created_at);
           return `${i+1}. **[${date}]** "${r.most_reacted_message.substring(0,80)}${r.most_reacted_message.length>80?'...':''}"`;
         }).join('\n')
