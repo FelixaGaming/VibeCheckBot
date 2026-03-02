@@ -1626,7 +1626,7 @@ async function handleVibeCommand(interaction) {
 
     if (usedNow === 1) await sendNewTrialEmail(serverName, serverId, interaction.user.tag);
 
-    if (usedNow % 5 === 0 && usedNow > 0) {
+    if (usedNow >= 5 && usedNow % 5 === 0) {
       await interaction.followUp({
         embeds: [new EmbedBuilder().setColor(0xA78BFA).setDescription(`🎉 **${usedNow} reports** done! Track your community's growth.`)],
         components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress'))],
