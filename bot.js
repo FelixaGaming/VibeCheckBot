@@ -195,6 +195,13 @@ function incrementServerThrottle(sid) {
 // MESSAGE FETCH
 // ============================================================
 
+// UTC-safe date label — prevents timezone shifting when converting timestamps to display dates
+function utcDateLabel(isoString, opts) {
+  const d = new Date(isoString);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    .toLocaleDateString('en-US', opts || { month: 'short', day: 'numeric' });
+}
+
 function sanitize(text) {
   if (!text || typeof text !== 'string') return '';
   return text
@@ -342,7 +349,7 @@ async function multiChannelToxChart(channelNames, channelResults) {
 async function scoreLineChart(reports) {
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const d = utcDateLabel(r.created_at);
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -367,7 +374,7 @@ async function scoreLineChart(reports) {
 }
 
 async function impactLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   return await chartUrl({
     type: 'line',
     data: {
@@ -388,7 +395,7 @@ async function impactLineChart(reports) {
 }
 
 async function sentimentStackedChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   const sd = (n, d) => d === 0 ? 0 : Math.round(n / d * 100);
   return await chartUrl({
     type: 'bar',
@@ -408,7 +415,7 @@ async function sentimentStackedChart(reports) {
 }
 
 async function flaggedLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   return await chartUrl({
     type: 'line',
     data: {
@@ -442,7 +449,7 @@ async function multiChannelLineChart(reports, allChs) {
   // Build unique date labels with index for duplicates
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const d = utcDateLabel(r.created_at);
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -1681,8 +1688,8 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     });
 
     // Date range label
-    const dateFrom = new Date(oldest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
-    const dateTo   = new Date(latest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    const dateFrom = utcDateLabel(oldest.created_at, { month:'short', day:'numeric', year:'numeric' });
+    const dateTo   = utcDateLabel(latest.created_at, { month:'short', day:'numeric', year:'numeric' });
     const timeframeLabel = range === '30d' ? 'Last 30 Days' : `Last ${filtered.length} Reports`;
 
     // ── SECTION 1: Community Overview ──
