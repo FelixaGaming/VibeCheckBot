@@ -1582,8 +1582,7 @@ async function handleVibeCommand(interaction) {
     const embeds  = await buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount, reactionsPerChannel);
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
-      new ButtonBuilder().setLabel('🎮 Play Vibe Quest').setStyle(ButtonStyle.Link).setURL('https://felixagaming.github.io/vibe-quest/'),
-      new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
+      new ButtonBuilder().setLabel('🎮 Play Vibe Quest').setStyle(ButtonStyle.Link).setURL('https://felixagaming.github.io/vibe-quest/')
     );
     if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
 
