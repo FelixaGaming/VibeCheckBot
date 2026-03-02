@@ -44,7 +44,6 @@ const CONFIG = {
   STRIPE_YEARLY_LINK:  'https://buy.stripe.com/bJebIUbJ56wd4Wye0v4ow03',
   CONTACT_EMAIL: 'play@felixagaming.com',
   REPORT_EMAIL:  'go@vibecheckbot.com',
-  OWNER_EMAIL:   'play@felixagaming.com',
   OWNER_ID:      '1185219817913991220',
   YEARLY_ENABLED: true,
   COOLDOWN_SECONDS: 15,
@@ -110,6 +109,7 @@ client.on('error', err => console.error('Discord client error:', err));
 const serverUsage = new Map(), cooldowns = new Map(), serverThrottle = new Map();
 
 async function getReportsUsed(serverId) {
+  if (await isTester(serverId)) return serverUsage.get(serverId)?.reportsUsed || 0;
   try {
     const { data } = await supabase.from('usage').select('reports_used').eq('server_id', serverId).single();
     return data?.reports_used || 0;
@@ -162,7 +162,12 @@ async function getReportsRemaining(serverId) {
 }
 
 async function incrementUsage(serverId) {
-  if (await isTester(serverId)) return;
+  if (await isTester(serverId)) {
+    // Track in memory so nudge and run counts work correctly for testers
+    if (!serverUsage.has(serverId)) serverUsage.set(serverId, { reportsUsed: 0 });
+    serverUsage.get(serverId).reportsUsed++;
+    return;
+  }
   try {
     const { data } = await supabase.from('usage').select('reports_used').eq('server_id', serverId).single();
     if (data) await supabase.from('usage').update({ reports_used: (data.reports_used || 0) + 1 }).eq('server_id', serverId);
@@ -189,13 +194,6 @@ function incrementServerThrottle(sid) {
 // ============================================================
 // MESSAGE FETCH
 // ============================================================
-
-// UTC-safe date label — prevents timezone shifting when converting timestamps to display dates
-function utcDateLabel(isoString, opts) {
-  const d = new Date(isoString);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-    .toLocaleDateString('en-US', opts || { month: 'short', day: 'numeric' });
-}
 
 function sanitize(text) {
   if (!text || typeof text !== 'string') return '';
@@ -344,7 +342,7 @@ async function multiChannelToxChart(channelNames, channelResults) {
 async function scoreLineChart(reports) {
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = utcDateLabel(r.created_at);
+    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -369,7 +367,7 @@ async function scoreLineChart(reports) {
 }
 
 async function impactLineChart(reports) {
-  const labels = reports.map(r => utcDateLabel(r.created_at));
+  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   return await chartUrl({
     type: 'line',
     data: {
@@ -390,7 +388,7 @@ async function impactLineChart(reports) {
 }
 
 async function sentimentStackedChart(reports) {
-  const labels = reports.map(r => utcDateLabel(r.created_at));
+  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   const sd = (n, d) => d === 0 ? 0 : Math.round(n / d * 100);
   return await chartUrl({
     type: 'bar',
@@ -410,7 +408,7 @@ async function sentimentStackedChart(reports) {
 }
 
 async function flaggedLineChart(reports) {
-  const labels = reports.map(r => utcDateLabel(r.created_at));
+  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
   return await chartUrl({
     type: 'line',
     data: {
@@ -444,7 +442,7 @@ async function multiChannelLineChart(reports, allChs) {
   // Build unique date labels with index for duplicates
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = utcDateLabel(r.created_at);
+    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -800,49 +798,21 @@ async function buildVibeEmbeds(result, analyzedCount, channelNames, timeframeLab
 // SAVE + LOG + EMAILS
 // ============================================================
 
-async function saveReport(serverId, serverName, channelNames, score, sentiment, flaggedCount, sensitivity, timeframe, analyzedCount, toxicityTypes, reactions, channelResults, reactionsPerChannel) {
+async function saveReport(serverId, serverName, channelNames, score, sentiment, flaggedCount, sensitivity, timeframe, analyzedCount, toxicityTypes, reactions) {
   try {
     // Build most_reacted_message string from reactions data
     const topReacted = reactions?.mostReacted
       ? `${reactions.mostReacted.text} [${reactions.mostReacted.reactions}]`
       : null;
 
-    const ts = new Date().toISOString();
-    const { error: insertError } = await supabase.from('reports').insert({
+    await supabase.from('reports').insert({
       server_id: serverId, server_name: serverName, channel_name: channelNames.join(', '),
       score, friendly: sentiment.friendly, neutral: sentiment.neutral, unfriendly: sentiment.unfriendly,
       flagged_count: flaggedCount, sensitivity, timeframe, messages_analyzed: analyzedCount,
       toxicity_types: JSON.stringify(toxicityTypes||{}),
       most_reacted_message: topReacted,
-      created_at: ts
+      created_at: new Date().toISOString()
     });
-    if (insertError) console.error(`[SAVE ERROR] Combined row failed: ${insertError.message}`);
-
-    // Also save individual channel rows for multi-channel runs (enables per-channel progress tracking)
-    if (channelResults && channelNames.length > 1) {
-      const individualRows = channelNames.map(ch => {
-        const r = channelResults[ch];
-        if (!r) return null;
-        const chReactions = reactionsPerChannel?.[ch.replace('#', '')];
-        const chTopReacted = chReactions?.mostReacted
-          ? `${chReactions.mostReacted.text} [${chReactions.mostReacted.reactions}]`
-          : null;
-        return {
-          server_id: serverId, server_name: serverName, channel_name: ch,
-          score: r.result.friendlinessScore,
-          friendly: r.result.sentiment.friendly, neutral: r.result.sentiment.neutral, unfriendly: r.result.sentiment.unfriendly,
-          flagged_count: r.result.flaggedMessages?.length || 0,
-          sensitivity, timeframe, messages_analyzed: r.analyzedCount,
-          toxicity_types: JSON.stringify(r.result.toxicityTypes||{}),
-          most_reacted_message: chTopReacted,
-          created_at: ts
-        };
-      }).filter(Boolean);
-      if (individualRows.length) {
-        const { error: indError } = await supabase.from('reports').insert(individualRows);
-        if (indError) console.error(`[SAVE ERROR] Individual rows failed: ${indError.message}`);
-      }
-    }
   } catch (e) { console.error('Save report error:', e.message); }
 }
 
@@ -1111,25 +1081,21 @@ async function notifyNewInstall(guild) {
 
   // Email alert
   try {
-    const body = `<table style="width:100%;border-collapse:collapse">
+    await adminEmail(
+      `🎉 New Install — ${name} (${members} members)`,
+      'linear-gradient(135deg,#22c55e,#16a34a)',
+      '🎉 New Server Installed Vibe Check Bot!',
+      `<table style="width:100%;border-collapse:collapse">
         ${infoRow('Server Name', name)}
         ${infoRow('Server ID', sid)}
         ${infoRow('Member Count', members)}
         ${infoRow('Free Reports', CONFIG.FREE_REPORTS)}
         ${infoRow('Status', '🟢 Free Trial Started')}
       </table>
-      <div style="margin-top:24px">
-        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#22c55e;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">🧪 Give Tester Access</a>
-        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#3b82f6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">⚡ Activate Pro</a>
-      </div>
-      <div style="margin-top:16px;padding:16px;background:#f0fdf4;border-radius:10px;font-size:13px;color:#15803d;font-family:monospace">
-        /vibe-admin action:tester server_id:${sid}<br>
-        /vibe-admin action:pro server_id:${sid}
-      </div>`;
-    await adminEmail(`🎉 New Install — ${name} (${members} members)`, 'linear-gradient(135deg,#22c55e,#16a34a)', '🎉 New Server Installed Vibe Check Bot!', body);
-    if (CONFIG.OWNER_EMAIL !== CONFIG.REPORT_EMAIL) {
-      await resend.emails.send({ from: 'Vibe Check Bot <reports@vibecheckbot.com>', to: CONFIG.OWNER_EMAIL, subject: `🎉 New Install — ${name} (${members} members)`, html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif"><div style="max-width:580px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)"><div style="background:linear-gradient(135deg,#22c55e,#16a34a);padding:28px 36px"><h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">🎉 New Server Installed Vibe Check Bot!</h1><div style="margin-top:6px;color:rgba(255,255,255,0.85);font-size:13px">${new Date().toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div></div><div style="padding:28px 36px">${body}</div></div></body></html>` });
-    }
+      <div style="margin-top:20px;padding:16px;background:#f0fdf4;border-radius:10px;font-size:14px;color:#15803d">
+        Use <strong>/vibe-admin action:tester server_id:${sid}</strong> to give unlimited tester access, or <strong>action:pro</strong> to activate Pro.
+      </div>`
+    );
   } catch (e) { console.error('New install email error:', e.message); }
 }
 
@@ -1224,27 +1190,22 @@ async function sendTrialEndedEmail(serverName, serverId, userName) {
   await notifyAdminChannel(embed, buttons);
 
   try {
-    const body = `<table style="width:100%;border-collapse:collapse">
+    await adminEmail(
+      `⚠️ Trial Exhausted — ${serverName} needs extension`,
+      'linear-gradient(135deg,#f59e0b,#d97706)',
+      '⚠️ Server Hit Their Free Trial Limit!',
+      `<table style="width:100%;border-collapse:collapse">
         ${infoRow('Server Name', serverName)}
         ${infoRow('Server ID', serverId)}
         ${infoRow('Triggered By', userName)}
         ${infoRow('Reports Used', '5 / 5 — Trial Exhausted')}
         ${infoRow('Action Needed', 'Extend trial or wait for them to upgrade')}
       </table>
-      <div style="margin-top:24px">
-        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#22c55e;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">➕ Extend Trial (+5)</a>
-        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#3b82f6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">⚡ Activate Pro</a>
-        <a href="https://discord.com/channels/@me" style="display:inline-block;margin:6px 6px 6px 0;padding:10px 18px;background:#8b5cf6;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px">🧪 Give Tester Access</a>
-      </div>
-      <div style="margin-top:16px;padding:16px;background:#fffbeb;border-radius:10px;font-size:13px;color:#92400e;font-family:monospace">
-        /vibe-admin action:test server_id:${serverId} reports:5<br>
-        /vibe-admin action:pro server_id:${serverId}<br>
-        /vibe-admin action:tester server_id:${serverId}
-      </div>`;
-    await adminEmail(`⚠️ Trial Exhausted — ${serverName} needs extension`, 'linear-gradient(135deg,#f59e0b,#d97706)', '⚠️ Server Hit Their Free Trial Limit!', body);
-    if (CONFIG.OWNER_EMAIL !== CONFIG.REPORT_EMAIL) {
-      await resend.emails.send({ from: 'Vibe Check Bot <reports@vibecheckbot.com>', to: CONFIG.OWNER_EMAIL, subject: `⚠️ Trial Exhausted — ${serverName} needs extension`, html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f9fafb;font-family:'Segoe UI',Arial,sans-serif"><div style="max-width:580px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)"><div style="background:linear-gradient(135deg,#f59e0b,#d97706);padding:28px 36px"><h1 style="margin:0;color:#fff;font-size:20px;font-weight:700">⚠️ Server Hit Their Free Trial Limit!</h1><div style="margin-top:6px;color:rgba(255,255,255,0.85);font-size:13px">${new Date().toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div></div><div style="padding:28px 36px">${body}</div></div></body></html>` });
-    }
+      <div style="margin-top:20px;padding:16px;background:#fffbeb;border-radius:10px;font-size:14px;color:#92400e">
+        To extend: <strong>/vibe-admin action:test server_id:${serverId} reports:5</strong><br>
+        To activate Pro: <strong>/vibe-admin action:pro server_id:${serverId}</strong>
+      </div>`
+    );
   } catch (e) { console.error('Trial ended email error:', e.message); }
 }
 
@@ -1310,10 +1271,8 @@ async function registerCommands() {
       {name:'50',value:50},{name:'100',value:100},{name:'250',value:250},{name:'500',value:500},{name:'1000 (Pro)',value:1000}));
 
   const progress = new SlashCommandBuilder().setName('vibe-progress').setDescription('Track your community friendliness over time')
-    .addStringOption(o=>o.setName('range').setDescription('Number of reports to show (default: 10)').setRequired(false).addChoices(
-      {name:'Last 5',value:'5'},{name:'Last 10',value:'10'},{name:'Last 20',value:'20'},{name:'Last 30',value:'30'}))
-    .addStringOption(o=>o.setName('timeframe').setDescription('Only include reports from within this period').setRequired(false).addChoices(
-      {name:'Last 1 hour',value:'1h'},{name:'Last 24 hours',value:'24h'},{name:'Last 7 days',value:'7d'},{name:'Last 14 days',value:'14d'},{name:'Last 30 days',value:'30d'}))
+    .addStringOption(o=>o.setName('range').setDescription('Reports to show (default: 10)').setRequired(false).addChoices(
+      {name:'Last 5',value:'5'},{name:'Last 10',value:'10'},{name:'Last 20',value:'20'},{name:'Last 30 days',value:'30d'}))
     .addStringOption(o=>o.setName('sensitivity').setDescription('Analysis strictness used in these reports').setRequired(false).addChoices(
       {name:'🎮 Low — Gaming/Adult',value:'low'},{name:'⚖️ Medium — General',value:'medium'},{name:'👶 High — Kids/Family',value:'high'}))
     .addStringOption(o=>o.setName('visibility').setDescription('Who sees the report (default: private)').setRequired(false).addChoices(
@@ -1432,7 +1391,6 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'vibe')          { await handleVibeCommand(interaction);    return; }
     if (interaction.commandName === 'vibe-progress') {
       const range = interaction.options.getString('range') || '10';
-      const timeframe = interaction.options.getString('timeframe') || null;
       const sensitivity = interaction.options.getString('sensitivity') || 'medium';
       const visibility = interaction.options.getString('visibility') || 'private';
       const filterChannels = [
@@ -1440,7 +1398,7 @@ client.on('interactionCreate', async interaction => {
         interaction.options.getChannel('channel2'),
         interaction.options.getChannel('channel3')
       ].filter(Boolean);
-      await handleProgressCommand(interaction, range, filterChannels, sensitivity, visibility, timeframe);
+      await handleProgressCommand(interaction, range, filterChannels, sensitivity, visibility);
       return;
     }
     if (interaction.commandName === 'vibe-admin') { await handleAdminCommand(interaction); return; }
@@ -1583,14 +1541,15 @@ async function handleVibeCommand(interaction) {
     const embeds  = await buildVibeEmbeds(result, totAnalyzed, channelNames, timeLabel, sensitivity, remaining, serverIsPaid, reactions, !isPrivate, chMsgCounts, channelResults, interaction.guild.memberCount, reactionsPerChannel);
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setLabel('📧 Request Tools').setStyle(ButtonStyle.Link).setURL('https://www.felixagaming.com/vibe'),
-      new ButtonBuilder().setLabel('🎮 Play Vibe Quest').setStyle(ButtonStyle.Link).setURL('https://felixagaming.github.io/vibe-quest/')
+      new ButtonBuilder().setLabel('🎮 Play Vibe Quest').setStyle(ButtonStyle.Link).setURL('https://felixagaming.github.io/vibe-quest/'),
+      new ButtonBuilder().setLabel('📈 View Progress').setStyle(ButtonStyle.Primary).setCustomId('view_progress')
     );
     if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
 
-    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactionsPerChannel[channelNames[0].replace('#','')], channelResults, reactionsPerChannel);
-    await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
-
     await interaction.editReply({ embeds, components: [buttons] });
+
+    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactionsPerChannel[channelNames[0]]);
+    await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
     await sendEmailReport(serverName, serverId, channelNames, result, totAnalyzed, timeLabel, sensitivity, remaining);
 
     const usedNow = await getReportsUsed(serverId);
@@ -1662,61 +1621,28 @@ async function handleVibeCommand(interaction) {
 // /vibe-progress HANDLER — 5-Section Report
 // ============================================================
 
-async function handleProgressCommand(interaction, range, filterChannels, sensitivity='medium', visibility='private', timeframe=null) {
+async function handleProgressCommand(interaction, range, filterChannels, sensitivity='medium', visibility='private') {
 
   const serverId = interaction.guildId;
   const isPrivate = visibility === 'private';
   await interaction.deferReply({ flags: isPrivate ? MessageFlags.Ephemeral : 0 });
 
   try {
-    const timeframeMs = {'1h':3600000,'24h':86400000,'7d':604800000,'14d':1209600000,'30d':2592000000}[timeframe];
     let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', { ascending: false });
-    const rangeInt = parseInt(range)||10;
-    if (timeframe) q = q.gte('created_at', new Date(Date.now()-timeframeMs).toISOString());
-    q = q.limit(rangeInt * 6); // multiply by 6 (max 5 channels + 1 combined row per run)
+    if (range === '30d') q = q.gte('created_at', new Date(Date.now()-30*86400000).toISOString());
+    else q = q.limit(parseInt(range)||10);
 
     const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
 
-
-    // Count unique runs (combined rows or single-channel rows without duplicates)
-    const uniqueRuns = new Set(reports.map(r => r.created_at.substring(0, 19))).size;
-    if (uniqueRuns < 2) {
-      return interaction.editReply({ embeds: [new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle('📈 Progress Report — Almost There!')
-        .setDescription(`You've run **${uniqueRuns} report** so far. Run \`/vibe\` at least **2 more times** to unlock trend graphs and predictive analytics.\n\nThe more reports you run, the more accurate your community insights become. Try running it daily or after big community events!`)
-        .setFooter({ text: 'Vibe Check Bot • Keep going — your data is building!' })
-      ]});
-    }
-
-    const normCh = n => n && !n.startsWith('#') ? `#${n}` : n;
-
     const sorted = [...reports].reverse(); // oldest → newest
-
-    // Split into global rows (one combined per run, for aggregate stats) and individual channel rows (for per-channel charts)
-    const runGroups = {};
-    sorted.forEach(r => {
-      const key = r.created_at.substring(0, 19); // group by second — all rows in same run share the same timestamp
-      if (!runGroups[key]) runGroups[key] = [];
-      runGroups[key].push(r);
-    });
-    const globalSorted = Object.values(runGroups)
-      .map(group => group.find(r => r.channel_name?.includes(',')) || group[0])
-      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-      .slice(-(range === '30d' ? Infinity : rangeInt)); // trim to requested run count
-    const channelSorted = sorted.filter(r => !r.channel_name?.includes(',')).map(r => ({ ...r, channel_name: normCh(r.channel_name) }));
-
-    let filtered = sorted, globalFiltered = globalSorted, channelFiltered = channelSorted, filterLabel = '';
+    let filtered = sorted, filterLabel = '';
     if (filterChannels?.length === 1) {
       const n = `#${filterChannels[0].name}`;
       filtered = sorted.filter(r => r.channel_name?.includes(n));
-      globalFiltered = globalSorted.filter(r => r.channel_name?.includes(n));
-      channelFiltered = channelSorted.filter(r => r.channel_name === n);
       filterLabel = ` • ${n}`;
       if (!filtered.length) return interaction.editReply(`No reports for ${n}. Run /vibe there first.`);
     }
-    filtered = globalFiltered; // use one-per-run rows for all aggregate stats to avoid double counting
 
     const latest  = filtered[filtered.length-1];
     const oldest  = filtered[0];
@@ -1730,11 +1656,8 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const uFirst=sd(oldest.unfriendly||0,ot), uLast=sd(latest.unfriendly||0,nt);
     const fDelta=fLast-fFirst, uDelta=uLast-uFirst;
 
-    // All unique individual channels — from per-channel rows, falling back to splitting combined names for old data
-    const rawChs = channelFiltered.length
-      ? channelFiltered.map(r => normCh(r.channel_name))
-      : globalSorted.flatMap(r => r.channel_name?.split(', ').map(normCh) || []);
-    const allChs = [...new Set(rawChs.filter(Boolean))];
+    // All unique channels across all reports
+    const allChs = [...new Set(sorted.map(r => r.channel_name).filter(Boolean))];
 
     // Cumulative toxicity
     const toxMap = {};
@@ -1752,18 +1675,15 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     // Per-channel message counts and latest scores from reports
     const chMsgTotals = {}, chLatestScore = {};
     allChs.forEach(ch => {
-      const chReports = channelSorted.filter(r => r.channel_name===ch);
+      const chReports = sorted.filter(r => r.channel_name===ch);
       chMsgTotals[ch]    = chReports.reduce((s,r) => s+(r.messages_analyzed||0), 0);
       chLatestScore[ch]  = chReports.length ? chReports[chReports.length-1].score : null;
     });
 
-    // Date range label — parse UTC date directly to avoid timezone shifting
-    const dateFrom = utcDateLabel(oldest.created_at, { month:'short', day:'numeric', year:'numeric' });
-    const dateTo   = utcDateLabel(latest.created_at, { month:'short', day:'numeric', year:'numeric' });
-    const timeframeNames = {'1h':'1 hour','24h':'24 hours','7d':'7 days','14d':'14 days','30d':'30 days'};
-    const timeframeLabel = timeframe
-      ? `Last ${filtered.length} Reports (within ${timeframeNames[timeframe]})`
-      : `Last ${filtered.length} Reports`;
+    // Date range label
+    const dateFrom = new Date(oldest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    const dateTo   = new Date(latest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    const timeframeLabel = range === '30d' ? 'Last 30 Days' : `Last ${filtered.length} Reports`;
 
     // ── SECTION 1: Community Overview ──
     const chListValue = allChs.length
@@ -1802,10 +1722,17 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const flagSummary = `First report: **${fFlag}** flagged | Latest: **${lFlag}** flagged\n` +
       (lFlag < fFlag ? `✅ Down ${fFlag-lFlag} — great progress` : lFlag > fFlag ? `⚠️ Up ${lFlag-fFlag} — opportunity to reinforce positive norms` : '➡️ Stable');
 
-    // Top 3 most reacted — sorted by date, pick 3 most recent that have data
+    // Top 3 most reacted — deduplicated by message text, most recent first
     const reportsWithReactions = filtered.filter(r => r.most_reacted_message);
-    const topReacted = reportsWithReactions.length > 0
-      ? reportsWithReactions.slice(-3).map((r,i) => {
+    const seenMessages = new Set();
+    const uniqueReacted = reportsWithReactions.filter(r => {
+      const key = r.most_reacted_message.substring(0, 80);
+      if (seenMessages.has(key)) return false;
+      seenMessages.add(key);
+      return true;
+    });
+    const topReacted = uniqueReacted.length > 0
+      ? uniqueReacted.slice(-3).map((r,i) => {
           const date = utcDateLabel(r.created_at);
           return `${i+1}. **[${date}]** "${r.most_reacted_message.substring(0,80)}${r.most_reacted_message.length>80?'...':''}"`;
         }).join('\n')
@@ -1826,7 +1753,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     // ── SECTION 2 chart embeds — each with title + explanation ──
 
     // Chart 1: Multi-channel trajectory
-    const multiChUrl = await multiChannelLineChart(channelFiltered.length ? channelFiltered : filtered, allChs);
+    const multiChUrl = await multiChannelLineChart(filtered, allChs);
     const eChart1 = new EmbedBuilder()
       .setColor(0xf97316)
       .setTitle('📊 Chart: Vibe Level Trajectory — All Channels')
@@ -1866,7 +1793,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
 
     // ── SECTION 3: Per-Channel ──
     const perChLines = allChs.map(ch => {
-      const chReports = channelSorted.filter(r => r.channel_name===ch);
+      const chReports = sorted.filter(r => r.channel_name===ch);
       if (!chReports.length) return null;
       const cl  = chReports[chReports.length-1].score;
       const co  = chReports[0].score;
