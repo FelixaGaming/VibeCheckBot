@@ -189,6 +189,13 @@ function incrementServerThrottle(sid) {
 // MESSAGE FETCH
 // ============================================================
 
+// UTC-safe date label — prevents timezone shifting when converting timestamps to display dates
+function utcDateLabel(isoString, opts) {
+  const d = new Date(isoString);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    .toLocaleDateString('en-US', opts || { month: 'short', day: 'numeric' });
+}
+
 function sanitize(text) {
   if (!text || typeof text !== 'string') return '';
   return text
@@ -336,7 +343,7 @@ async function multiChannelToxChart(channelNames, channelResults) {
 async function scoreLineChart(reports) {
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const d = utcDateLabel(r.created_at);
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -361,7 +368,7 @@ async function scoreLineChart(reports) {
 }
 
 async function impactLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   return await chartUrl({
     type: 'line',
     data: {
@@ -382,7 +389,7 @@ async function impactLineChart(reports) {
 }
 
 async function sentimentStackedChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   const sd = (n, d) => d === 0 ? 0 : Math.round(n / d * 100);
   return await chartUrl({
     type: 'bar',
@@ -402,7 +409,7 @@ async function sentimentStackedChart(reports) {
 }
 
 async function flaggedLineChart(reports) {
-  const labels = reports.map(r => new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+  const labels = reports.map(r => utcDateLabel(r.created_at));
   return await chartUrl({
     type: 'line',
     data: {
@@ -436,7 +443,7 @@ async function multiChannelLineChart(reports, allChs) {
   // Build unique date labels with index for duplicates
   const labelCount = {};
   const labels = reports.map(r => {
-    const d = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const d = utcDateLabel(r.created_at);
     labelCount[d] = (labelCount[d] || 0) + 1;
     return labelCount[d] > 1 ? `${d} (${labelCount[d]})` : d;
   });
@@ -1570,7 +1577,7 @@ async function handleVibeCommand(interaction) {
     );
     if (!serverIsPaid && !tester) buttons.addComponents(new ButtonBuilder().setLabel('⚡ Upgrade to Pro').setStyle(ButtonStyle.Link).setURL(CONFIG.STRIPE_MONTHLY_LINK));
 
-    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactionsPerChannel[channelNames[0]], channelResults, reactionsPerChannel);
+    await saveReport(serverId, serverName, channelNames, result.friendlinessScore, result.sentiment, result.flaggedMessages?.length||0, sensitivity, timeframe, totAnalyzed, result.toxicityTypes, reactionsPerChannel[channelNames[0].replace('#','')], channelResults, reactionsPerChannel);
     await logResearchData({ serverName, serverId, memberCount: interaction.guild.memberCount, channelNames, channelResults, analyzedCount: totAnalyzed, score: result.friendlinessScore, sentiment: result.sentiment, flaggedCount: result.flaggedMessages?.length||0, toxicityTypes: result.toxicityTypes, sensitivity, timeframe, isPro: serverIsPaid, inputTokens: totIn, outputTokens: totOut, cost: totCost, processingTime: totTime });
 
     await interaction.editReply({ embeds, components: [buttons] });
@@ -1662,6 +1669,17 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
 
     console.log(`[PROGRESS DEBUG] Raw rows fetched: ${reports.length}, dates: ${reports.map(r => r.created_at.substring(0,10)).join(', ')}`);
 
+    // Count unique runs (combined rows or single-channel rows without duplicates)
+    const uniqueRuns = new Set(reports.map(r => r.created_at.substring(0, 19))).size;
+    if (uniqueRuns < 2) {
+      return interaction.editReply({ embeds: [new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('📈 Progress Report — Almost There!')
+        .setDescription(`You've run **${uniqueRuns} report** so far. Run \`/vibe\` at least **2 more times** to unlock trend graphs and predictive analytics.\n\nThe more reports you run, the more accurate your community insights become. Try running it daily or after big community events!`)
+        .setFooter({ text: 'Vibe Check Bot • Keep going — your data is building!' })
+      ]});
+    }
+
     const normCh = n => n && !n.startsWith('#') ? `#${n}` : n;
 
     const sorted = [...reports].reverse(); // oldest → newest
@@ -1730,9 +1748,9 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       chLatestScore[ch]  = chReports.length ? chReports[chReports.length-1].score : null;
     });
 
-    // Date range label
-    const dateFrom = new Date(oldest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
-    const dateTo   = new Date(latest.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    // Date range label — parse UTC date directly to avoid timezone shifting
+    const dateFrom = utcDateLabel(oldest.created_at, { month:'short', day:'numeric', year:'numeric' });
+    const dateTo   = utcDateLabel(latest.created_at, { month:'short', day:'numeric', year:'numeric' });
     const timeframeLabel = range === '30d' ? 'Last 30 Days' : `Last ${filtered.length} Reports`;
 
     // ── SECTION 1: Community Overview ──
@@ -1776,7 +1794,7 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const reportsWithReactions = filtered.filter(r => r.most_reacted_message);
     const topReacted = reportsWithReactions.length > 0
       ? reportsWithReactions.slice(-3).map((r,i) => {
-          const date = new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          const date = utcDateLabel(r.created_at);
           return `${i+1}. **[${date}]** "${r.most_reacted_message.substring(0,80)}${r.most_reacted_message.length>80?'...':''}"`;
         }).join('\n')
       : '_Reaction data will appear here after your next `/vibe` run — this feature tracks the most engaged message from each report going forward._';
