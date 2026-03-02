@@ -1310,8 +1310,10 @@ async function registerCommands() {
       {name:'50',value:50},{name:'100',value:100},{name:'250',value:250},{name:'500',value:500},{name:'1000 (Pro)',value:1000}));
 
   const progress = new SlashCommandBuilder().setName('vibe-progress').setDescription('Track your community friendliness over time')
-    .addStringOption(o=>o.setName('range').setDescription('Reports to show (default: 10)').setRequired(false).addChoices(
-      {name:'Last 5',value:'5'},{name:'Last 10',value:'10'},{name:'Last 20',value:'20'},{name:'Last 30 days',value:'30d'}))
+    .addStringOption(o=>o.setName('range').setDescription('Number of reports to show (default: 10)').setRequired(false).addChoices(
+      {name:'Last 5',value:'5'},{name:'Last 10',value:'10'},{name:'Last 20',value:'20'},{name:'Last 30',value:'30'}))
+    .addStringOption(o=>o.setName('timeframe').setDescription('Only include reports from within this period').setRequired(false).addChoices(
+      {name:'Last 1 hour',value:'1h'},{name:'Last 24 hours',value:'24h'},{name:'Last 7 days',value:'7d'},{name:'Last 14 days',value:'14d'},{name:'Last 30 days',value:'30d'}))
     .addStringOption(o=>o.setName('sensitivity').setDescription('Analysis strictness used in these reports').setRequired(false).addChoices(
       {name:'🎮 Low — Gaming/Adult',value:'low'},{name:'⚖️ Medium — General',value:'medium'},{name:'👶 High — Kids/Family',value:'high'}))
     .addStringOption(o=>o.setName('visibility').setDescription('Who sees the report (default: private)').setRequired(false).addChoices(
@@ -1430,6 +1432,7 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'vibe')          { await handleVibeCommand(interaction);    return; }
     if (interaction.commandName === 'vibe-progress') {
       const range = interaction.options.getString('range') || '10';
+      const timeframe = interaction.options.getString('timeframe') || null;
       const sensitivity = interaction.options.getString('sensitivity') || 'medium';
       const visibility = interaction.options.getString('visibility') || 'private';
       const filterChannels = [
@@ -1437,7 +1440,7 @@ client.on('interactionCreate', async interaction => {
         interaction.options.getChannel('channel2'),
         interaction.options.getChannel('channel3')
       ].filter(Boolean);
-      await handleProgressCommand(interaction, range, filterChannels, sensitivity, visibility);
+      await handleProgressCommand(interaction, range, filterChannels, sensitivity, visibility, timeframe);
       return;
     }
     if (interaction.commandName === 'vibe-admin') { await handleAdminCommand(interaction); return; }
@@ -1659,17 +1662,18 @@ async function handleVibeCommand(interaction) {
 // /vibe-progress HANDLER — 5-Section Report
 // ============================================================
 
-async function handleProgressCommand(interaction, range, filterChannels, sensitivity='medium', visibility='private') {
+async function handleProgressCommand(interaction, range, filterChannels, sensitivity='medium', visibility='private', timeframe=null) {
 
   const serverId = interaction.guildId;
   const isPrivate = visibility === 'private';
   await interaction.deferReply({ flags: isPrivate ? MessageFlags.Ephemeral : 0 });
 
   try {
+    const timeframeMs = {'1h':3600000,'24h':86400000,'7d':604800000,'14d':1209600000,'30d':2592000000}[timeframe];
     let q = supabase.from('reports').select('*').eq('server_id', serverId).order('created_at', { ascending: false });
     const rangeInt = parseInt(range)||10;
-    if (range === '30d') q = q.gte('created_at', new Date(Date.now()-30*86400000).toISOString());
-    else q = q.limit(rangeInt * 6); // multiply by 6 (max 5 channels + 1 combined row per run)
+    if (timeframe) q = q.gte('created_at', new Date(Date.now()-timeframeMs).toISOString());
+    q = q.limit(rangeInt * 6); // multiply by 6 (max 5 channels + 1 combined row per run)
 
     const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
@@ -1756,7 +1760,10 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     // Date range label — parse UTC date directly to avoid timezone shifting
     const dateFrom = utcDateLabel(oldest.created_at, { month:'short', day:'numeric', year:'numeric' });
     const dateTo   = utcDateLabel(latest.created_at, { month:'short', day:'numeric', year:'numeric' });
-    const timeframeLabel = range === '30d' ? 'Last 30 Days' : `Last ${filtered.length} Reports`;
+    const timeframeNames = {'1h':'1 hour','24h':'24 hours','7d':'7 days','14d':'14 days','30d':'30 days'};
+    const timeframeLabel = timeframe
+      ? `Last ${filtered.length} Reports (within ${timeframeNames[timeframe]})`
+      : `Last ${filtered.length} Reports`;
 
     // ── SECTION 1: Community Overview ──
     const chListValue = allChs.length
