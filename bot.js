@@ -817,7 +817,6 @@ async function saveReport(serverId, serverName, channelNames, score, sentiment, 
       created_at: ts
     });
     if (insertError) console.error(`[SAVE ERROR] Combined row failed: ${insertError.message}`);
-    else console.log(`[SAVE DEBUG] Combined row saved: ${channelNames.join(', ')} at ${ts}`);
 
     // Also save individual channel rows for multi-channel runs (enables per-channel progress tracking)
     if (channelResults && channelNames.length > 1) {
@@ -842,7 +841,6 @@ async function saveReport(serverId, serverName, channelNames, score, sentiment, 
       if (individualRows.length) {
         const { error: indError } = await supabase.from('reports').insert(individualRows);
         if (indError) console.error(`[SAVE ERROR] Individual rows failed: ${indError.message}`);
-        else console.log(`[SAVE DEBUG] Individual rows saved: ${channelNames.join(', ')} at ${ts}`);
       }
     }
   } catch (e) { console.error('Save report error:', e.message); }
@@ -1676,7 +1674,6 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
     const { data: reports, error } = await q;
     if (error || !reports?.length) return interaction.editReply('No reports found. Run `/vibe` first.');
 
-    console.log(`[PROGRESS DEBUG] Raw rows fetched: ${reports.length}, dates: ${reports.map(r => r.created_at.substring(0,10)).join(', ')}`);
 
     // Count unique runs (combined rows or single-channel rows without duplicates)
     const uniqueRuns = new Set(reports.map(r => r.created_at.substring(0, 19))).size;
@@ -1704,7 +1701,6 @@ async function handleProgressCommand(interaction, range, filterChannels, sensiti
       .map(group => group.find(r => r.channel_name?.includes(',')) || group[0])
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
       .slice(-(range === '30d' ? Infinity : rangeInt)); // trim to requested run count
-    console.log(`[PROGRESS DEBUG] globalSorted after grouping+slice: ${globalSorted.length} runs, dates: ${globalSorted.map(r => r.created_at.substring(0,10)).join(', ')}`);
     const channelSorted = sorted.filter(r => !r.channel_name?.includes(',')).map(r => ({ ...r, channel_name: normCh(r.channel_name) }));
 
     let filtered = sorted, globalFiltered = globalSorted, channelFiltered = channelSorted, filterLabel = '';
